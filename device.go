@@ -5,7 +5,7 @@
 // Package usbhid provides support for interacting with USB HID
 // devices connected to a computer, from userspace.
 //
-// It is writen in pure Go and works on Linux and Windows.
+// It is written in pure Go and works on Linux and Windows.
 package usbhid
 
 import (
@@ -161,8 +161,9 @@ func (d *Device) GetInputReport() (byte, []byte, error) {
 
 // SetOutputReport writes an output report to the USB HID device.
 // It takes the report id and a slice of bytes with the data to be sent,
-// and returns an error or nil. It also checks if the data being
-// sent fits the report size defined in the USB HID report descriptor.
+// and returns an error or nil. If the size of the slice is lower than
+// the expected report size, it will be zero padded, and if it is bigger,
+// an error is returned.
 func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 	if d.file == nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
@@ -193,8 +194,9 @@ func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 
 // SetFeatureReport writes an output report to the USB HID device.
 // It takes the report id and a slice of bytes with the data to be sent,
-// and returns an error or nil. It also checks if the data being
-// sent fits the report size defined in the USB HID report descriptor.
+// and returns an error or nil. If the size of the slice is lower than
+// the expected report size, it will be zero padded, and if it is bigger,
+// an error is returned.
 func (d *Device) SetFeatureReport(reportId byte, data []byte) error {
 	if d.file == nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
@@ -205,6 +207,21 @@ func (d *Device) SetFeatureReport(reportId byte, data []byte) error {
 	}
 
 	return d.setFeatureReport(reportId, data)
+}
+
+// GetInputReportLength returns the data size of an input report in bytes.
+func (d *Device) GetInputReportLength() uint16 {
+	return d.reportInputLength
+}
+
+// GetOutputReportLength returns the data size of an output report in bytes.
+func (d *Device) GetOutputReportLength() uint16 {
+	return d.reportOutputLength
+}
+
+// GetFeatureReportLength returns the data size of a feature report in bytes.
+func (d *Device) GetFeatureReportLength() uint16 {
+	return d.reportFeatureLength
 }
 
 // Path returns a string representation of the USB HID device path.
