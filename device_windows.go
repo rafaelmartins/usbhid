@@ -15,6 +15,11 @@ import (
 	"unsafe"
 )
 
+type deviceExtra struct {
+	file  *os.File
+	flock *os.File
+}
+
 const (
 	kLOCKFILE_FAIL_IMMEDIATELY = 0x01
 	kLOCKFILE_EXCLUSIVE_LOCK   = 0x02
@@ -221,7 +226,7 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
-	if d.file != nil {
+	if d.extra.file != nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
 	}
 
@@ -230,7 +235,7 @@ func (d *Device) open(lock bool) error {
 		return err
 	}
 
-	d.file = f
+	d.extra.file = f
 
 	if lock {
 		return d.lock()
@@ -239,7 +244,7 @@ func (d *Device) open(lock bool) error {
 }
 
 func (d *Device) lock() error {
-	if d.file == nil {
+	if d.extra.file == nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
@@ -266,7 +271,7 @@ func (d *Device) lock() error {
 			f.Close()
 			return err
 		}
-		d.flock = f
+		d.extra.flock = f
 
 		return nil
 	}()
@@ -280,25 +285,25 @@ func (d *Device) lock() error {
 }
 
 func (d *Device) isOpen() bool {
-	return d.file != nil
+	return d.extra.file != nil
 }
 
 func (d *Device) close() error {
-	if d.file == nil {
+	if d.extra.file == nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
-	if err := d.file.Close(); err != nil {
+	if err := d.extra.file.Close(); err != nil {
 		return err
 	}
-	d.file = nil
+	d.extra.file = nil
 
-	if d.flock != nil {
-		fn := d.flock.Name()
-		if err := d.flock.Close(); err != nil {
+	if d.extra.flock != nil {
+		fn := d.extra.flock.Name()
+		if err := d.extra.flock.Close(); err != nil {
 			return err
 		}
-		d.flock = nil
+		d.extra.flock = nil
 		os.Remove(fn)
 	}
 
@@ -308,7 +313,7 @@ func (d *Device) close() error {
 func (d *Device) getInputReport() (byte, []byte, error) {
 	buf := make([]byte, d.reportInputLength+1)
 
-	n, err := d.file.Read(buf)
+	n, err := d.extra.file.Read(buf)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -320,7 +325,7 @@ func (d *Device) setOutputReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
 	buf = append(buf, make([]byte, int(d.reportOutputLength)+1-len(buf))...)
 
-	_, err := d.file.Write(buf)
+	_, err := d.extra.file.Write(buf)
 	return err
 }
 
@@ -328,7 +333,7 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	buf := make([]byte, d.reportFeatureLength+1)
 	buf[0] = reportId
 
-	_, _, err := hidD_GetFeature.Call(d.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	_, _, err := hidD_GetFeature.Call(d.extra.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if err.(syscall.Errno) != 0 {
 		return nil, err
 	}
@@ -340,7 +345,7 @@ func (d *Device) setFeatureReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
 	buf = append(buf, make([]byte, int(d.reportFeatureLength)+1-len(buf))...)
 
-	_, _, err := hidD_SetFeature.Call(d.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	_, _, err := hidD_SetFeature.Call(d.extra.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if err.(syscall.Errno) != 0 {
 		return err
 	}

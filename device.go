@@ -11,7 +11,6 @@ package usbhid
 import (
 	"errors"
 	"fmt"
-	"os"
 )
 
 // Errors returned from usbhid package may be tested against these errors
@@ -46,10 +45,7 @@ type Device struct {
 	reportFeatureLength uint16
 	reportWithId        bool
 
-	file     *os.File
-	flock    *os.File
-	dfile    uintptr
-	doptions uint32
+	extra deviceExtra
 }
 
 // DeviceFilterFunc is a function prototype that helps defining a filter

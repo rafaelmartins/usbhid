@@ -12,6 +12,11 @@ import (
 	"github.com/ebitengine/purego"
 )
 
+type deviceExtra struct {
+	file    uintptr
+	options uint32
+}
+
 var (
 	_CFSetGetCount             func(set uintptr) int
 	_CFSetGetValues            func(set uintptr, value unsafe.Pointer) uintptr
@@ -131,8 +136,10 @@ func enumerate() ([]*Device, error) {
 		}
 
 		dev := &Device{
-			path:     path,
-			doptions: kIOHIDOptionsTypeNone,
+			path: path,
+			extra: deviceExtra{
+				options: kIOHIDOptionsTypeNone,
+			},
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VendorID"), kCFStringEncodingUTF8)); prop != 0 {
@@ -194,7 +201,7 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
-	if d.dfile != 0 {
+	if d.extra.file != 0 {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
 	}
 
@@ -206,15 +213,15 @@ func (d *Device) open(lock bool) error {
 	}
 	defer _IOObjectRelease(entry)
 
-	d.dfile = _IOHIDDeviceCreate(kCFAllocatorDefault, entry)
-	if d.dfile == 0 {
+	d.extra.file = _IOHIDDeviceCreate(kCFAllocatorDefault, entry)
+	if d.extra.file == 0 {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceFailedToOpen)
 	}
 
 	if lock {
-		d.doptions = kIOHIDOptionsTypeSeizeDevice
+		d.extra.options = kIOHIDOptionsTypeSeizeDevice
 	}
-	if _IOHIDDeviceOpen(d.dfile, d.doptions) != kIOReturnSuccess {
+	if _IOHIDDeviceOpen(d.extra.file, d.extra.options) != kIOReturnSuccess {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceFailedToOpen)
 	}
 
@@ -222,18 +229,18 @@ func (d *Device) open(lock bool) error {
 }
 
 func (d *Device) isOpen() bool {
-	return d.dfile != 0
+	return d.extra.file != 0
 }
 
 func (d *Device) close() error {
-	if d.dfile == 0 {
+	if d.extra.file == 0 {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
-	if _IOHIDDeviceClose(d.dfile, d.doptions) != kIOReturnSuccess {
+	if _IOHIDDeviceClose(d.extra.file, d.extra.options) != kIOReturnSuccess {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceFailedToClose)
 	}
-	_CFRelease(d.dfile)
+	_CFRelease(d.extra.file)
 
 	return nil
 }
