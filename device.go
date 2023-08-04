@@ -23,6 +23,9 @@ var (
 	ErrMoreThanOneDeviceFound = errors.New("more than one device found")
 	ErrDeviceLocked           = errors.New("device is locked by another application")
 	ErrReportIsTooBig         = errors.New("report is too big")
+	ErrDeviceFailedToOpen     = errors.New("failed to open device")
+	ErrDeviceFailedToClose    = errors.New("failed to close device")
+	ErrHIDManagerOpen         = errors.New("failed to open HID manager")
 )
 
 // Device is an opaque structure that represents a USB HID device connected
@@ -43,8 +46,10 @@ type Device struct {
 	reportFeatureLength uint16
 	reportWithId        bool
 
-	file  *os.File
-	flock *os.File
+	file     *os.File
+	flock    *os.File
+	dfile    uintptr
+	doptions uint32
 }
 
 // DeviceFilterFunc is a function prototype that helps defining a filter
