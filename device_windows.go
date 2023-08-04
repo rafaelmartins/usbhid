@@ -220,6 +220,24 @@ func enumerate() ([]*Device, error) {
 	return rv, nil
 }
 
+func (d *Device) open(lock bool) error {
+	if d.file != nil {
+		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
+	}
+
+	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
+	if err != nil {
+		return err
+	}
+
+	d.file = f
+
+	if lock {
+		return d.lock()
+	}
+	return nil
+}
+
 func (d *Device) lock() error {
 	if d.file == nil {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
@@ -259,6 +277,32 @@ func (d *Device) lock() error {
 		}
 	}
 	return err
+}
+
+func (d *Device) isOpen() bool {
+	return d.file != nil
+}
+
+func (d *Device) close() error {
+	if d.file == nil {
+		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+	}
+
+	if err := d.file.Close(); err != nil {
+		return err
+	}
+	d.file = nil
+
+	if d.flock != nil {
+		fn := d.flock.Name()
+		if err := d.flock.Close(); err != nil {
+			return err
+		}
+		d.flock = nil
+		os.Remove(fn)
+	}
+
+	return nil
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {

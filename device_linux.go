@@ -107,12 +107,41 @@ func enumerate() ([]*Device, error) {
 	return rv, nil
 }
 
-func (d *Device) lock() error {
-	if err := syscall.Flock(int(d.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == syscall.EWOULDBLOCK {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceLocked)
-	} else {
+func (d *Device) open(lock bool) error {
+	if d.file != nil {
+		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
+	}
+
+	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
+	if err != nil {
 		return err
 	}
+
+	d.file = f
+
+	if lock {
+		if err := syscall.Flock(int(d.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == syscall.EWOULDBLOCK {
+			return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceLocked)
+		}
+	}
+	return nil
+}
+
+func (d *Device) isOpen() bool {
+	return d.file != nil
+}
+
+func (d *Device) close() error {
+	if d.file == nil {
+		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+	}
+
+	if err := d.file.Close(); err != nil {
+		return err
+	}
+	d.file = nil
+
+	return nil
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {

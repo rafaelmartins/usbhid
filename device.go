@@ -103,56 +103,24 @@ func Get(f DeviceFilterFunc, open bool, lock bool) (*Device, error) {
 
 // Open opens the USB HID device for usage.
 func (d *Device) Open(lock bool) error {
-	if d.file != nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
-	}
-
-	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
-	if err != nil {
-		return err
-	}
-
-	d.file = f
-
-	if lock {
-		return d.lock()
-	}
-	return nil
+	return d.open(lock)
 }
 
 // IsOpen checks if the USB HID device is open and available for usage
 func (d *Device) IsOpen() bool {
-	return d.file != nil
+	return d.isOpen()
 }
 
 // Close closes the USB HID device
 func (d *Device) Close() error {
-	if d.file == nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
-	}
-
-	if err := d.file.Close(); err != nil {
-		return err
-	}
-	d.file = nil
-
-	if d.flock != nil {
-		fn := d.flock.Name()
-		if err := d.flock.Close(); err != nil {
-			return err
-		}
-		d.flock = nil
-		os.Remove(fn)
-	}
-
-	return nil
+	return d.close()
 }
 
 // GetInputReport reads an input report from the USB HID device.
 // It will block until a report is available, and returns the report id,
 // a slice of bytes with the report content, and an error (or nil).
 func (d *Device) GetInputReport() (byte, []byte, error) {
-	if d.file == nil {
+	if !d.isOpen() {
 		return 0, nil, fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
@@ -165,7 +133,7 @@ func (d *Device) GetInputReport() (byte, []byte, error) {
 // the expected report size, it will be zero padded, and if it is bigger,
 // an error is returned.
 func (d *Device) SetOutputReport(reportId byte, data []byte) error {
-	if d.file == nil {
+	if !d.isOpen() {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
@@ -185,7 +153,7 @@ func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 // It takes the desired report id and returns a slice of bytes with the report
 // content and an error (or nil).
 func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
-	if d.file == nil {
+	if !d.isOpen() {
 		return nil, fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
@@ -198,7 +166,7 @@ func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 // the expected report size, it will be zero padded, and if it is bigger,
 // an error is returned.
 func (d *Device) SetFeatureReport(reportId byte, data []byte) error {
-	if d.file == nil {
+	if !d.isOpen() {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
 	}
 
