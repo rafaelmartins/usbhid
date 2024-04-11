@@ -1,4 +1,4 @@
-// Copyright 2022-2023 Rafael G.Martins. All rights reserved.
+// Copyright 2022-2023 Rafael G. Martins. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -174,8 +174,6 @@ func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 	}
 
 	buf := append([]byte{reportId}, data...)
-	buf = append(buf, make([]byte, int(d.reportOutputLength)+1-len(buf))...)
-
 	_, err := d.file.Write(buf)
 	return err
 }

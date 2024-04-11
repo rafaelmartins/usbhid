@@ -1,4 +1,4 @@
-// Copyright 2022-2023 Rafael G.Martins. All rights reserved.
+// Copyright 2022-2023 Rafael G. Martins. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -286,7 +286,6 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 
 func (d *Device) setFeatureReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
-	buf = append(buf, make([]byte, int(d.reportFeatureLength)+1-len(buf))...)
 
 	_, _, err := hidD_SetFeature.Call(d.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if err.(syscall.Errno) != 0 {
