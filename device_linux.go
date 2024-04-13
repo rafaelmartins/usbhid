@@ -136,16 +136,25 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 
 func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	buf := make([]byte, d.reportFeatureLength+1)
-	buf[0] = reportId
+	if d.reportWithId {
+		buf[0] = reportId
+	}
 
-	if err := ioctl(d.file.Fd(), uint(ioc(iocWrite|iocRead, 'H', 0x07, uint16(len(buf)))), uintptr(unsafe.Pointer(&buf[0]))); err != nil {
+	rv, err := ioctl(d.file.Fd(), uint(ioc(iocWrite|iocRead, 'H', 0x07, uint16(len(buf)))), uintptr(unsafe.Pointer(&buf[0])))
+	if err != nil {
 		return nil, err
 	}
-	return buf[1:], nil
+
+	start := 0
+	if d.reportWithId {
+		start++
+		rv--
+	}
+	return buf[start : start+rv], nil
 }
 
 func (d *Device) setFeatureReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
-
-	return ioctl(d.file.Fd(), uint(ioc(iocWrite|iocRead, 'H', 0x06, uint16(len(buf)))), uintptr(unsafe.Pointer(&buf[0])))
+	_, err := ioctl(d.file.Fd(), uint(ioc(iocWrite|iocRead, 'H', 0x06, uint16(len(buf)))), uintptr(unsafe.Pointer(&buf[0])))
+	return err
 }

@@ -79,10 +79,10 @@ func ioc(dir byte, typ byte, nr byte, size uint16) uint32 {
 	return uint32(dir)<<iocDirShift | uint32(typ)<<iocTypeShift | uint32(nr)<<iocNrShift | uint32(size)<<iocSizeShift
 }
 
-func ioctl(fd uintptr, request uint, arg uintptr) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(request), arg)
+func ioctl(fd uintptr, request uint, arg uintptr) (int, error) {
+	rv, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(request), arg)
 	if errno != 0 {
-		return fmt.Errorf("usbhid: ioctl: 0x%x: %s", request, errno)
+		return 0, fmt.Errorf("usbhid: ioctl: 0x%x: %s", request, errno)
 	}
-	return nil
+	return int(rv), nil
 }
