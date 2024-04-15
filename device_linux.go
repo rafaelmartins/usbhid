@@ -134,6 +134,12 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 	return 0, buf[:n], nil
 }
 
+func (d *Device) setOutputReport(reportId byte, data []byte) error {
+	buf := append([]byte{reportId}, data...)
+	_, err := d.file.Write(buf)
+	return err
+}
+
 func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	buf := make([]byte, d.reportFeatureLength+1)
 	if d.reportWithId {

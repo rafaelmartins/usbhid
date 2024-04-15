@@ -1,4 +1,4 @@
-// Copyright 2022-2023 Rafael G. Martins. All rights reserved.
+// Copyright 2022-2024 Rafael G. Martins. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -47,7 +47,6 @@ var (
 	hid                        = syscall.NewLazyDLL("hid.dll")
 	hidD_FreePreparsedData     = hid.NewProc("HidD_FreePreparsedData")
 	hidD_GetAttributes         = hid.NewProc("HidD_GetAttributes")
-	hidD_GetFeature            = hid.NewProc("HidD_GetFeature")
 	hidD_GetHidGuid            = hid.NewProc("HidD_GetHidGuid")
 	hidD_GetManufacturerString = hid.NewProc("HidD_GetManufacturerString")
 	hidD_GetPreparsedData      = hid.NewProc("HidD_GetPreparsedData")
@@ -104,12 +103,12 @@ type hHIDP_CAPS struct {
 
 func enumerate() ([]*Device, error) {
 	guid := gGUID{}
-	if _, _, err := hidD_GetHidGuid.Call(uintptr(unsafe.Pointer(&guid))); err.(syscall.Errno) != 0 {
+	if _, _, err := hidD_GetHidGuid.Call(uintptr(unsafe.Pointer(&guid))); err != nil && err.(syscall.Errno) != 0 {
 		return nil, err
 	}
 
 	devInfo, _, err := setupDiGetClassDevsA.Call(uintptr(unsafe.Pointer(&guid)), 0, 0, uintptr(sDIGCF_PRESENT|sDIGCF_DEVICEINTERFACE))
-	if err.(syscall.Errno) != 0 {
+	if err != nil && err.(syscall.Errno) != 0 {
 		return nil, err
 	}
 	defer setupDiDestroyDeviceInfoList.Call(devInfo)
@@ -126,13 +125,13 @@ func enumerate() ([]*Device, error) {
 		if b == 0 {
 			break
 		}
-		if err.(syscall.Errno) != 0 {
+		if err != nil && err.(syscall.Errno) != 0 {
 			continue
 		}
 
 		reqSize := uint32(0)
 		_, _, err = setupDiGetDeviceInterfaceDetailA.Call(devInfo, uintptr(unsafe.Pointer(&itf)), 0, uintptr(uint32(0)), uintptr(unsafe.Pointer(&reqSize)), 0)
-		if err.(syscall.Errno) != syscall.ERROR_INSUFFICIENT_BUFFER {
+		if err != nil && err.(syscall.Errno) != syscall.ERROR_INSUFFICIENT_BUFFER {
 			continue
 		}
 
@@ -141,7 +140,7 @@ func enumerate() ([]*Device, error) {
 		detail.cbSize = uint32(unsafe.Sizeof(sSP_DEVICE_INTERFACE_DETAIL_DATA_A{}))
 
 		_, _, err = setupDiGetDeviceInterfaceDetailA.Call(devInfo, uintptr(unsafe.Pointer(&itf)), uintptr(unsafe.Pointer(detail)), uintptr(reqSize), 0, 0)
-		if err.(syscall.Errno) != 0 {
+		if err != nil && err.(syscall.Errno) != 0 {
 			continue
 		}
 
@@ -160,7 +159,7 @@ func enumerate() ([]*Device, error) {
 
 			attr := hHIDD_ATTRIBUTES{}
 			_, _, err = hidD_GetAttributes.Call(f.Fd(), uintptr(unsafe.Pointer(&attr)))
-			if err.(syscall.Errno) != 0 {
+			if err != nil && err.(syscall.Errno) != 0 {
 				return nil
 			}
 			rv.vendorId = attr.vendorID
@@ -170,23 +169,23 @@ func enumerate() ([]*Device, error) {
 			buf := make([]uint16, 4092/2)
 
 			_, _, err = hidD_GetManufacturerString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err.(syscall.Errno) == 0 {
+			if err != nil && err.(syscall.Errno) == 0 {
 				rv.manufacturer = syscall.UTF16ToString(buf)
 			}
 
 			_, _, err = hidD_GetProductString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err.(syscall.Errno) == 0 {
+			if err != nil && err.(syscall.Errno) == 0 {
 				rv.product = syscall.UTF16ToString(buf)
 			}
 
 			_, _, err = hidD_GetSerialNumberString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err.(syscall.Errno) == 0 {
+			if err != nil && err.(syscall.Errno) == 0 {
 				rv.serialNumber = syscall.UTF16ToString(buf)
 			}
 
 			var preparsed uintptr
 			b, _, err := hidD_GetPreparsedData.Call(f.Fd(), uintptr(unsafe.Pointer(&preparsed)))
-			if err.(syscall.Errno) != 0 {
+			if err != nil && err.(syscall.Errno) != 0 {
 				return nil
 			}
 			if b == 0 {
@@ -196,7 +195,7 @@ func enumerate() ([]*Device, error) {
 
 			var caps hHIDP_CAPS
 			status, _, err := hidP_GetCaps.Call(preparsed, uintptr(unsafe.Pointer(&caps)))
-			if err.(syscall.Errno) != 0 {
+			if err != nil && err.(syscall.Errno) != 0 {
 				return nil
 			}
 			if status != hHIDP_STATUS_SUCCESS {
@@ -244,7 +243,7 @@ func (d *Device) lock() error {
 
 		ovl := &syscall.Overlapped{}
 		_, _, err = lockFileEx.Call(f.Fd(), kLOCKFILE_EXCLUSIVE_LOCK|kLOCKFILE_FAIL_IMMEDIATELY, 0, 0xffffffff, 0xffffffff, uintptr(unsafe.Pointer(ovl)))
-		if err.(syscall.Errno) != 0 {
+		if err != nil && err.(syscall.Errno) != 0 {
 			f.Close()
 			return err
 		}
@@ -272,23 +271,35 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 	return buf[0], buf[1:n], nil
 }
 
+func (d *Device) setOutputReport(reportId byte, data []byte) error {
+	buf := data
+	if len(buf) >= int(d.reportOutputLength) {
+		buf = buf[:d.reportOutputLength]
+	} else {
+		buf = append(buf, make([]byte, int(d.reportOutputLength)-len(buf))...)
+	}
+	buf = append([]byte{reportId}, buf...)
+	_, err := d.file.Write(buf)
+	return err
+}
+
 func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	buf := make([]byte, d.reportFeatureLength+1)
 	buf[0] = reportId
 
-	_, _, err := hidD_GetFeature.Call(d.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if err.(syscall.Errno) != 0 {
+	n, err := ioctl(d.file.Fd(), kIOCTL_HID_GET_FEATURE, nil, buf)
+	if err != nil && err.(syscall.Errno) != 0 {
 		return nil, err
 	}
 
-	return buf[1:], nil
+	return buf[1:n], nil
 }
 
 func (d *Device) setFeatureReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
 
 	_, _, err := hidD_SetFeature.Call(d.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if err.(syscall.Errno) != 0 {
+	if err != nil && err.(syscall.Errno) != 0 {
 		return err
 	}
 
