@@ -173,9 +173,7 @@ func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrReportIsTooBig)
 	}
 
-	buf := append([]byte{reportId}, data...)
-	_, err := d.file.Write(buf)
-	return err
+	return d.setOutputReport(reportId, data)
 }
 
 // GetFeatureReport reads a feature report from the USB HID device.
