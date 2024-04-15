@@ -1,4 +1,4 @@
-// Copyright 2022-2023 Rafael G.Martins. All rights reserved.
+// Copyright 2022-2024 Rafael G. Martins. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -22,17 +22,33 @@ func hidValue(size byte, buf []byte) uint32 {
 	return 0
 }
 
+func max(m map[uint32][]uint32) uint16 {
+	var rv uint16
+	for _, es := range m {
+		var sum float64
+		for _, e := range es {
+			sum += float64(e)
+		}
+		if res := uint16(math.Ceil(sum / 8)); res > rv {
+			rv = res
+		}
+	}
+	return rv
+}
+
 func hidParseReportDescriptor(descriptor []byte) (uint16, uint16, uint16, uint16, uint16, bool) {
 	var (
 		withId       bool
 		rcollectionl byte
 		rcount       uint32
 		rsize        uint32
-		rusagePage   uint16
-		rusage       uint16
-		sinput       uint16
-		soutput      uint16
-		sfeature     uint16
+		rusagePage   uint32
+		rusage       uint32
+		rid          uint32
+
+		input   = map[uint32][]uint32{}
+		output  = map[uint32][]uint32{}
+		feature = map[uint32][]uint32{}
 	)
 
 	for i := 0; i < len(descriptor); {
@@ -52,22 +68,16 @@ func hidParseReportDescriptor(descriptor []byte) (uint16, uint16, uint16, uint16
 		case 0: // main
 			switch tag {
 			case 8: // input
-				if s := uint16(math.Ceil(float64(rcount*rsize) / 8)); s > sinput {
-					sinput = s
-				}
+				input[rid] = append(input[rid], rcount*rsize)
 
 			case 9: // output
-				if s := uint16(math.Ceil(float64(rcount*rsize) / 8)); s > soutput {
-					soutput = s
-				}
+				output[rid] = append(output[rid], rcount*rsize)
 
 			case 10: // collection
 				rcollectionl++
 
 			case 11: // feature
-				if s := uint16(math.Ceil(float64(rcount*rsize) / 8)); s > sfeature {
-					sfeature = s
-				}
+				feature[rid] = append(feature[rid], rcount*rsize)
 
 			case 12: // collection end
 				rcollectionl--
@@ -77,13 +87,14 @@ func hidParseReportDescriptor(descriptor []byte) (uint16, uint16, uint16, uint16
 			switch tag {
 			case 0: // usage page
 				if rcollectionl == 0 {
-					rusagePage = uint16(hidValue(size, descriptor[i:]))
+					rusagePage = hidValue(size, descriptor[i:])
 				}
 
 			case 7: // report size
 				rsize = hidValue(size, descriptor[i:])
 
-			case 8: // report id}
+			case 8: // report id
+				rid = hidValue(size, descriptor[i:])
 				withId = true
 
 			case 9: // report count
@@ -94,7 +105,7 @@ func hidParseReportDescriptor(descriptor []byte) (uint16, uint16, uint16, uint16
 			switch tag {
 			case 0: // usage
 				if rcollectionl == 0 {
-					rusage = uint16(hidValue(size, descriptor[i:]))
+					rusage = hidValue(size, descriptor[i:])
 				}
 			}
 		}
@@ -102,5 +113,5 @@ func hidParseReportDescriptor(descriptor []byte) (uint16, uint16, uint16, uint16
 		i += int(size)
 	}
 
-	return rusagePage, rusage, sinput, soutput, sfeature, withId
+	return uint16(rusagePage), uint16(rusage), max(input), max(output), max(feature), withId
 }
