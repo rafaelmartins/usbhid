@@ -19,13 +19,12 @@ type deviceExtra struct {
 	options uint32
 	runloop uintptr
 
+	mtx          sync.Mutex
 	disconnect   bool
 	disconnectCh chan bool
-
-	inputMtx    sync.Mutex
-	inputBuffer []byte
-	inputCh     chan []byte
-	inputClosed bool
+	inputBuffer  []byte
+	inputCh      chan []byte
+	inputClosed  bool
 }
 
 const (
@@ -250,8 +249,8 @@ func enumerate() ([]*Device, error) {
 func reportCallback(context unsafe.Pointer, result int, sender uintptr, reportType uintptr, reportId uint32, report uintptr, reportLength int64) {
 	d := (*Device)(context)
 
-	d.extra.inputMtx.Lock()
-	defer d.extra.inputMtx.Unlock()
+	d.extra.mtx.Lock()
+	defer d.extra.mtx.Unlock()
 
 	if d.extra.inputBuffer != nil && !d.extra.inputClosed {
 		select {
@@ -273,8 +272,8 @@ func (d *Device) open(lock bool) error {
 		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
 	}
 
-	d.extra.inputMtx.Lock()
-	defer d.extra.inputMtx.Unlock()
+	d.extra.mtx.Lock()
+	defer d.extra.mtx.Unlock()
 
 	pathB := make([]byte, 512)
 	copy(pathB[:], d.path)
@@ -303,7 +302,7 @@ func (d *Device) open(lock bool) error {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		d.extra.inputMtx.Lock()
+		d.extra.mtx.Lock()
 		d.extra.runloop = _CFRunLoopGetCurrent()
 		d.extra.inputBuffer = make([]byte, d.reportInputLength+1)
 		d.extra.inputCh = make(chan []byte, 1024)
@@ -312,14 +311,13 @@ func (d *Device) open(lock bool) error {
 		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), purego.NewCallback(reportCallback), unsafe.Pointer(d))
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, purego.NewCallback(removalCallback), unsafe.Pointer(d))
 
-		d.extra.inputMtx.Unlock()
+		d.extra.mtx.Unlock()
 
 		_CFRunLoopRun()
 
-		d.extra.inputMtx.Lock()
-		defer d.extra.inputMtx.Unlock()
-
+		d.extra.mtx.Lock()
 		d.extra.inputClosed = true
+		d.extra.mtx.Unlock()
 	}()
 
 	return nil
@@ -372,6 +370,9 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 }
 
 func (d *Device) setOutputReport(reportId byte, data []byte) error {
+	d.extra.mtx.Lock()
+	defer d.extra.mtx.Unlock()
+
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return err
@@ -388,6 +389,9 @@ func (d *Device) setOutputReport(reportId byte, data []byte) error {
 }
 
 func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
+	d.extra.mtx.Lock()
+	defer d.extra.mtx.Unlock()
+
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return nil, err
@@ -405,6 +409,9 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 }
 
 func (d *Device) setFeatureReport(reportId byte, data []byte) error {
+	d.extra.mtx.Lock()
+	defer d.extra.mtx.Unlock()
+
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return err
