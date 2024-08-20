@@ -79,6 +79,19 @@ var (
 	_IORegistryEntryGetPath                 func(entry uint32, plane []byte, path []byte) int
 	_IORegistryEntryGetRegistryEntryID      func(entry uint32, entryID *uint64) int
 	_IORegistryEntryFromPath                func(mainPort uint32, path []byte) uint32
+
+	_sVendorID             uintptr
+	_sProductID            uintptr
+	_sVersionNumber        uintptr
+	_sPrimaryUsagePage     uintptr
+	_sPrimaryUsage         uintptr
+	_sMaxInputReportSize   uintptr
+	_sMaxOutputReportSize  uintptr
+	_sMaxFeatureReportSize uintptr
+	_sManufacturer         uintptr
+	_sProduct              uintptr
+	_sSerialNumber         uintptr
+	_sTransport            uintptr
 )
 
 func init() {
@@ -129,6 +142,19 @@ func init() {
 	purego.RegisterLibFunc(&_IORegistryEntryGetPath, iokit, "IORegistryEntryGetPath")
 	purego.RegisterLibFunc(&_IORegistryEntryGetRegistryEntryID, iokit, "IORegistryEntryGetRegistryEntryID")
 	purego.RegisterLibFunc(&_IORegistryEntryFromPath, iokit, "IORegistryEntryFromPath")
+
+	_sVendorID = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VendorID"), kCFStringEncodingUTF8)
+	_sProductID = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ProductID"), kCFStringEncodingUTF8)
+	_sVersionNumber = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VersionNumber"), kCFStringEncodingUTF8)
+	_sPrimaryUsagePage = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsagePage"), kCFStringEncodingUTF8)
+	_sPrimaryUsage = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsage"), kCFStringEncodingUTF8)
+	_sMaxInputReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxInputReportSize"), kCFStringEncodingUTF8)
+	_sMaxOutputReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxOutputReportSize"), kCFStringEncodingUTF8)
+	_sMaxFeatureReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxFeatureReportSize"), kCFStringEncodingUTF8)
+	_sManufacturer = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Manufacturer"), kCFStringEncodingUTF8)
+	_sProduct = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Product"), kCFStringEncodingUTF8)
+	_sSerialNumber = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("SerialNumber"), kCFStringEncodingUTF8)
+	_sTransport = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Transport"), kCFStringEncodingUTF8)
 }
 
 func byteSliceToString(b []byte) string {
@@ -171,7 +197,7 @@ func enumerate() ([]*Device, error) {
 			continue
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Transport"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sTransport); prop != 0 {
 			_CFStringGetCString(prop, buf[:], kCFStringEncodingUTF8)
 			if transport := byteSliceToString(buf[:]); transport != "USB" {
 				continue
@@ -188,52 +214,52 @@ func enumerate() ([]*Device, error) {
 			},
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VendorID"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sVendorID); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.vendorId))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ProductID"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sProductID); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.productId))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VersionNumber"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sVersionNumber); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.version))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsagePage"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sPrimaryUsagePage); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.usagePage))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsage"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sPrimaryUsage); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.usage))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxInputReportSize"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sMaxInputReportSize); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportInputLength))
 			dev.reportInputLength--
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxOutputReportSize"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sMaxOutputReportSize); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportOutputLength))
 			dev.reportOutputLength--
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxFeatureReportSize"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sMaxFeatureReportSize); prop != 0 {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportFeatureLength))
 			dev.reportFeatureLength--
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Manufacturer"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sManufacturer); prop != 0 {
 			_CFStringGetCString(prop, buf[:], kCFStringEncodingUTF8)
 			dev.manufacturer = byteSliceToString(buf[:])
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Product"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sProduct); prop != 0 {
 			_CFStringGetCString(prop, buf[:], kCFStringEncodingUTF8)
 			dev.product = byteSliceToString(buf[:])
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _CFStringCreateWithCString(kCFAllocatorDefault, []byte("SerialNumber"), kCFStringEncodingUTF8)); prop != 0 {
+		if prop := _IOHIDDeviceGetProperty(device, _sSerialNumber); prop != 0 {
 			_CFStringGetCString(prop, buf[:], kCFStringEncodingUTF8)
 			dev.serialNumber = byteSliceToString(buf[:])
 		}
