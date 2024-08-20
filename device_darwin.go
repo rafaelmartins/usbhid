@@ -285,7 +285,7 @@ func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportTyp
 		} else if d.extra.inputBuffer == nil {
 			res = fmt.Errorf("usbhid: %s: failed to get input report: buffer is nil", d.path)
 		} else {
-			res = append([]byte{}, d.extra.inputBuffer...)
+			res = append([]byte{}, d.extra.inputBuffer[:reportLength]...)
 		}
 
 		select {
@@ -417,6 +417,7 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 type resultCtx struct {
 	device *Device
 	op     string
+	len    int64
 	err    chan error
 }
 
@@ -435,6 +436,7 @@ func resultCallback(context unsafe.Pointer, result int, sender uintptr, reportTy
 		err = fmt.Errorf("usbhid: %s: failed to %s %s: 0x%08x", ctx.device.path, ctx.op, typ, result)
 	}
 
+	ctx.len = reportLength
 	ctx.err <- err
 }
 
@@ -487,5 +489,5 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	if err := <-ctx.err; err != nil {
 		return nil, err
 	}
-	return buf[1:], nil
+	return buf[1:ctx.len], nil
 }
