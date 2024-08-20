@@ -23,7 +23,7 @@ type deviceExtra struct {
 	disconnect   bool
 	disconnectCh chan bool
 	inputBuffer  []byte
-	inputCh      chan []byte
+	inputCh      chan interface{}
 	inputClosed  bool
 }
 
@@ -62,13 +62,13 @@ var (
 	_IOHIDDeviceClose                       func(device uintptr, options uint32) int
 	_IOHIDDeviceCreate                      func(allocator uintptr, service uint32) uintptr
 	_IOHIDDeviceGetProperty                 func(device uintptr, key uintptr) uintptr
-	_IOHIDDeviceGetReport                   func(device uintptr, reportType uint, reportId int64, report []byte, pReportLength *int64) int
+	_IOHIDDeviceGetReportWithCallback       func(device uintptr, reportType uint, reportId int64, report []byte, pReportLength *int64, timeout float64, callback uintptr, context unsafe.Pointer) int
 	_IOHIDDeviceGetService                  func(device uintptr) uint32
 	_IOHIDDeviceOpen                        func(device uintptr, options uint32) int
 	_IOHIDDeviceRegisterInputReportCallback func(device uintptr, report unsafe.Pointer, reportLength int64, callback uintptr, context unsafe.Pointer)
 	_IOHIDDeviceRegisterRemovalCallback     func(device uintptr, callback uintptr, context unsafe.Pointer)
 	_IOHIDDeviceScheduleWithRunLoop         func(device uintptr, runLoop uintptr, runLoopMode uintptr)
-	_IOHIDDeviceSetReport                   func(device uintptr, reportType uint, reportID int64, report []byte, reportLength int64) int
+	_IOHIDDeviceSetReportWithCallback       func(device uintptr, reportType uint, reportID int64, report []byte, reportLength int64, timeout float64, callback uintptr, context unsafe.Pointer)
 	_IOHIDDeviceUnscheduleFromRunLoop       func(device uintptr, runLoop uintptr, runLoopMode uintptr)
 	_IOHIDManagerClose                      func(manager uintptr, options uint32) int
 	_IOHIDManagerCopyDevices                func(manager uintptr) uintptr
@@ -112,13 +112,13 @@ func init() {
 	purego.RegisterLibFunc(&_IOHIDDeviceClose, iokit, "IOHIDDeviceClose")
 	purego.RegisterLibFunc(&_IOHIDDeviceCreate, iokit, "IOHIDDeviceCreate")
 	purego.RegisterLibFunc(&_IOHIDDeviceGetProperty, iokit, "IOHIDDeviceGetProperty")
-	purego.RegisterLibFunc(&_IOHIDDeviceGetReport, iokit, "IOHIDDeviceGetReport")
+	purego.RegisterLibFunc(&_IOHIDDeviceGetReportWithCallback, iokit, "IOHIDDeviceGetReportWithCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceGetService, iokit, "IOHIDDeviceGetService")
 	purego.RegisterLibFunc(&_IOHIDDeviceOpen, iokit, "IOHIDDeviceOpen")
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterInputReportCallback, iokit, "IOHIDDeviceRegisterInputReportCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterRemovalCallback, iokit, "IOHIDDeviceRegisterRemovalCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceScheduleWithRunLoop, iokit, "IOHIDDeviceScheduleWithRunLoop")
-	purego.RegisterLibFunc(&_IOHIDDeviceSetReport, iokit, "IOHIDDeviceSetReport")
+	purego.RegisterLibFunc(&_IOHIDDeviceSetReportWithCallback, iokit, "IOHIDDeviceSetReportWithCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceUnscheduleFromRunLoop, iokit, "IOHIDDeviceUnscheduleFromRunLoop")
 	purego.RegisterLibFunc(&_IOHIDManagerClose, iokit, "IOHIDManagerClose")
 	purego.RegisterLibFunc(&_IOHIDManagerCopyDevices, iokit, "IOHIDManagerCopyDevices")
@@ -246,15 +246,24 @@ func enumerate() ([]*Device, error) {
 	return rv, nil
 }
 
-func reportCallback(context unsafe.Pointer, result int, sender uintptr, reportType uintptr, reportId uint32, report uintptr, reportLength int64) {
+func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportType uintptr, reportId uint32, report uintptr, reportLength int64) {
 	d := (*Device)(context)
 
 	d.extra.mtx.Lock()
 	defer d.extra.mtx.Unlock()
 
-	if d.extra.inputBuffer != nil && !d.extra.inputClosed {
+	if !d.extra.inputClosed {
+		var res interface{}
+		if result != kIOReturnSuccess {
+			res = fmt.Errorf("usbhid: %s: failed to get input report: 0x%08x", d.path, result)
+		} else if d.extra.inputBuffer == nil {
+			res = fmt.Errorf("usbhid: %s: failed to get input report: buffer is nil", d.path)
+		} else {
+			res = append([]byte{}, d.extra.inputBuffer...)
+		}
+
 		select {
-		case d.extra.inputCh <- append([]byte{}, d.extra.inputBuffer...):
+		case d.extra.inputCh <- res:
 		default:
 		}
 	}
@@ -262,6 +271,7 @@ func reportCallback(context unsafe.Pointer, result int, sender uintptr, reportTy
 
 func removalCallback(context unsafe.Pointer, result int, sender uintptr) {
 	d := (*Device)(context)
+
 	d.extra.disconnect = true
 	d.extra.inputClosed = true
 	close(d.extra.disconnectCh)
@@ -298,27 +308,31 @@ func (d *Device) open(lock bool) error {
 		return fmt.Errorf("usbhid: %s: %w: 0x%08x", d.path, ErrDeviceFailedToOpen, rv)
 	}
 
+	wait := make(chan interface{})
+
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		d.extra.mtx.Lock()
 		d.extra.runloop = _CFRunLoopGetCurrent()
 		d.extra.inputBuffer = make([]byte, d.reportInputLength+1)
-		d.extra.inputCh = make(chan []byte, 1024)
+		d.extra.inputCh = make(chan interface{}, 1024)
 
 		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**uintptr)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), purego.NewCallback(reportCallback), unsafe.Pointer(d))
+		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), purego.NewCallback(inputCallback), unsafe.Pointer(d))
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, purego.NewCallback(removalCallback), unsafe.Pointer(d))
 
-		d.extra.mtx.Unlock()
+		wait <- nil
 
 		_CFRunLoopRun()
 
 		d.extra.mtx.Lock()
+		defer d.extra.mtx.Unlock()
+
 		d.extra.inputClosed = true
-		d.extra.mtx.Unlock()
 	}()
+
+	<-wait
 
 	return nil
 }
@@ -359,8 +373,13 @@ func (d *Device) close() error {
 
 func (d *Device) getInputReport() (byte, []byte, error) {
 	select {
-	case rv := <-d.extra.inputCh:
+	case result := <-d.extra.inputCh:
+		if err, ok := result.(error); ok {
+			return 0, nil, err
+		}
+		rv := result.([]byte)
 		return rv[0], rv[1:], nil
+
 	case <-d.extra.disconnectCh:
 		if err := d.close(); err != nil {
 			return 0, nil, err
@@ -369,10 +388,31 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 	}
 }
 
-func (d *Device) setOutputReport(reportId byte, data []byte) error {
-	d.extra.mtx.Lock()
-	defer d.extra.mtx.Unlock()
+type resultCtx struct {
+	device *Device
+	op     string
+	err    chan error
+}
 
+func resultCallback(context unsafe.Pointer, result int, sender uintptr, reportType uint, reportId uint32, report uintptr, reportLength int64) {
+	ctx := (*resultCtx)(context)
+
+	var err error
+	if result != kIOReturnSuccess {
+		typ := "report"
+		switch reportType {
+		case kIOHIDReportTypeOutput:
+			typ = "output report"
+		case kIOHIDReportTypeFeature:
+			typ = "feature report"
+		}
+		err = fmt.Errorf("usbhid: %s: failed to %s %s: 0x%08x", ctx.device.path, ctx.op, typ, result)
+	}
+
+	ctx.err <- err
+}
+
+func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return err
@@ -380,18 +420,26 @@ func (d *Device) setOutputReport(reportId byte, data []byte) error {
 		return fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
 	}
 
-	buf := append([]byte{reportId}, data...)
-
-	if rv := _IOHIDDeviceSetReport(d.extra.file, kIOHIDReportTypeOutput, int64(reportId), buf, int64(len(buf))); rv != kIOReturnSuccess {
-		return fmt.Errorf("usbhid: %s: failed to set output report: 0x%08x", d.path, rv)
+	ctx := &resultCtx{
+		device: d,
+		op:     "set",
+		err:    make(chan error),
 	}
-	return nil
+	buf := append([]byte{reportId}, data...)
+	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, int64(reportId), buf, int64(len(buf)), 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx))
+
+	return <-ctx.err
+}
+
+func (d *Device) setOutputReport(reportId byte, data []byte) error {
+	return d.setReport(kIOHIDReportTypeOutput, reportId, data)
+}
+
+func (d *Device) setFeatureReport(reportId byte, data []byte) error {
+	return d.setReport(kIOHIDReportTypeFeature, reportId, data)
 }
 
 func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
-	d.extra.mtx.Lock()
-	defer d.extra.mtx.Unlock()
-
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return nil, err
@@ -399,30 +447,19 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 		return nil, fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
 	}
 
+	ctx := &resultCtx{
+		device: d,
+		op:     "get",
+		err:    make(chan error),
+	}
 	buf := make([]byte, d.reportFeatureLength+1)
 	l := int64(d.reportFeatureLength + 1)
+	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l, 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
+		return nil, fmt.Errorf("usbhid: %s: failed to register callback to get feature report: 0x%08x", d.path, rv)
+	}
 
-	if rv := _IOHIDDeviceGetReport(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l); rv != kIOReturnSuccess {
-		return nil, fmt.Errorf("usbhid: %s: failed to get feature report: 0x%08x", d.path, rv)
+	if err := <-ctx.err; err != nil {
+		return nil, err
 	}
 	return buf[1:], nil
-}
-
-func (d *Device) setFeatureReport(reportId byte, data []byte) error {
-	d.extra.mtx.Lock()
-	defer d.extra.mtx.Unlock()
-
-	if d.extra.disconnect {
-		if err := d.close(); err != nil {
-			return err
-		}
-		return fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
-	}
-
-	buf := append([]byte{reportId}, data...)
-
-	if rv := _IOHIDDeviceSetReport(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, int64(len(buf))); rv != kIOReturnSuccess {
-		return fmt.Errorf("usbhid: %s: failed to set feature report: 0x%08x", d.path, rv)
-	}
-	return nil
 }
