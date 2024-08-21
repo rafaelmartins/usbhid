@@ -44,11 +44,18 @@ const (
 	kIOReturnExclusiveAccess int = 0xe00002c5
 )
 
+type _CFRange struct {
+	location int64
+	length   int64
+}
+
 var (
 	mgr uintptr
 
 	_kCFRunLoopDefaultMode uintptr
 
+	_CFDataGetBytes            func(data uintptr, rang _CFRange, buffer []byte)
+	_CFDataGetLength           func(data uintptr) int64
 	_CFNumberGetValue          func(number uintptr, theType int64, valuePtr unsafe.Pointer) bool
 	_CFRelease                 func(cf uintptr)
 	_CFRunLoopGetCurrent       func() uintptr
@@ -80,18 +87,14 @@ var (
 	_IORegistryEntryGetRegistryEntryID      func(entry uint32, entryID *uint64) int
 	_IORegistryEntryFromPath                func(mainPort uint32, path []byte) uint32
 
-	_sVendorID             uintptr
-	_sProductID            uintptr
-	_sVersionNumber        uintptr
-	_sPrimaryUsagePage     uintptr
-	_sPrimaryUsage         uintptr
-	_sMaxInputReportSize   uintptr
-	_sMaxOutputReportSize  uintptr
-	_sMaxFeatureReportSize uintptr
-	_sManufacturer         uintptr
-	_sProduct              uintptr
-	_sSerialNumber         uintptr
-	_sTransport            uintptr
+	_sTransport        uintptr
+	_sVendorID         uintptr
+	_sProductID        uintptr
+	_sVersionNumber    uintptr
+	_sManufacturer     uintptr
+	_sProduct          uintptr
+	_sSerialNumber     uintptr
+	_sReportDescriptor uintptr
 )
 
 func init() {
@@ -102,6 +105,8 @@ func init() {
 		panic(err)
 	}
 
+	purego.RegisterLibFunc(&_CFDataGetBytes, cf, "CFDataGetBytes")
+	purego.RegisterLibFunc(&_CFDataGetLength, cf, "CFDataGetLength")
 	purego.RegisterLibFunc(&_CFNumberGetValue, cf, "CFNumberGetValue")
 	purego.RegisterLibFunc(&_CFRelease, cf, "CFRelease")
 	purego.RegisterLibFunc(&_CFRunLoopGetCurrent, cf, "CFRunLoopGetCurrent")
@@ -143,18 +148,14 @@ func init() {
 	purego.RegisterLibFunc(&_IORegistryEntryGetRegistryEntryID, iokit, "IORegistryEntryGetRegistryEntryID")
 	purego.RegisterLibFunc(&_IORegistryEntryFromPath, iokit, "IORegistryEntryFromPath")
 
+	_sTransport = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Transport"), kCFStringEncodingUTF8)
 	_sVendorID = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VendorID"), kCFStringEncodingUTF8)
 	_sProductID = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ProductID"), kCFStringEncodingUTF8)
 	_sVersionNumber = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VersionNumber"), kCFStringEncodingUTF8)
-	_sPrimaryUsagePage = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsagePage"), kCFStringEncodingUTF8)
-	_sPrimaryUsage = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("PrimaryUsage"), kCFStringEncodingUTF8)
-	_sMaxInputReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxInputReportSize"), kCFStringEncodingUTF8)
-	_sMaxOutputReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxOutputReportSize"), kCFStringEncodingUTF8)
-	_sMaxFeatureReportSize = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("MaxFeatureReportSize"), kCFStringEncodingUTF8)
 	_sManufacturer = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Manufacturer"), kCFStringEncodingUTF8)
 	_sProduct = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Product"), kCFStringEncodingUTF8)
 	_sSerialNumber = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("SerialNumber"), kCFStringEncodingUTF8)
-	_sTransport = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Transport"), kCFStringEncodingUTF8)
+	_sReportDescriptor = _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ReportDescriptor"), kCFStringEncodingUTF8)
 }
 
 func byteSliceToString(b []byte) string {
@@ -179,7 +180,7 @@ func enumerate() ([]*Device, error) {
 	devices := make([]uintptr, _CFSetGetCount(device_set))
 	_CFSetGetValues(device_set, unsafe.Pointer(&devices[0]))
 
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 
 	rv := []*Device{}
 	for _, device := range devices {
@@ -226,29 +227,6 @@ func enumerate() ([]*Device, error) {
 			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.version))
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, _sPrimaryUsagePage); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.usagePage))
-		}
-
-		if prop := _IOHIDDeviceGetProperty(device, _sPrimaryUsage); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.usage))
-		}
-
-		if prop := _IOHIDDeviceGetProperty(device, _sMaxInputReportSize); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportInputLength))
-			dev.reportInputLength--
-		}
-
-		if prop := _IOHIDDeviceGetProperty(device, _sMaxOutputReportSize); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportOutputLength))
-			dev.reportOutputLength--
-		}
-
-		if prop := _IOHIDDeviceGetProperty(device, _sMaxFeatureReportSize); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.reportFeatureLength))
-			dev.reportFeatureLength--
-		}
-
 		if prop := _IOHIDDeviceGetProperty(device, _sManufacturer); prop != 0 {
 			_CFStringGetCString(prop, buf[:], kCFStringEncodingUTF8)
 			dev.manufacturer = byteSliceToString(buf[:])
@@ -264,7 +242,14 @@ func enumerate() ([]*Device, error) {
 			dev.serialNumber = byteSliceToString(buf[:])
 		}
 
-		dev.reportWithId = true
+		descriptor := []byte{}
+		if prop := _IOHIDDeviceGetProperty(device, _sReportDescriptor); prop != 0 {
+			l := _CFDataGetLength(prop)
+			_CFDataGetBytes(prop, _CFRange{0, l}, buf[:])
+			descriptor = append(descriptor, buf[:l]...)
+		}
+
+		dev.usagePage, dev.usage, dev.reportInputLength, dev.reportOutputLength, dev.reportFeatureLength, dev.reportWithId = hidParseReportDescriptor(descriptor)
 
 		rv = append(rv, dev)
 	}
@@ -404,7 +389,11 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 			return 0, nil, err
 		}
 		rv := result.([]byte)
-		return rv[0], rv[1:], nil
+
+		if d.reportWithId {
+			return rv[0], rv[1:], nil
+		}
+		return 0, rv[:], nil
 
 	case <-d.extra.disconnectCh:
 		if err := d.close(); err != nil {
@@ -453,7 +442,10 @@ func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
 		op:     "set",
 		err:    make(chan error),
 	}
-	buf := append([]byte{reportId}, data...)
+	buf := append([]byte{}, data...)
+	if d.reportWithId {
+		buf = append([]byte{reportId}, buf...)
+	}
 	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, int64(reportId), buf, int64(len(buf)), 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx))
 
 	return <-ctx.err
@@ -489,5 +481,9 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	if err := <-ctx.err; err != nil {
 		return nil, err
 	}
-	return buf[1:ctx.len], nil
+
+	if d.reportWithId {
+		return buf[1:ctx.len], nil
+	}
+	return buf[:ctx.len], nil
 }
