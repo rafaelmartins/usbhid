@@ -23,7 +23,7 @@ type deviceExtra struct {
 	disconnect   bool
 	disconnectCh chan bool
 	inputBuffer  []byte
-	inputCh      chan interface{}
+	inputCh      chan inputCtx
 	inputClosed  bool
 }
 
@@ -266,26 +266,33 @@ func enumerate() ([]*Device, error) {
 	return rv, nil
 }
 
+type inputCtx struct {
+	buf []byte
+	err error
+}
+
 func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportType uintptr, reportId uint32, report uintptr, reportLength int64) {
 	d := (*Device)(context)
 
 	d.extra.mtx.Lock()
 	defer d.extra.mtx.Unlock()
 
-	if !d.extra.inputClosed {
-		var res interface{}
-		if result != kIOReturnSuccess {
-			res = fmt.Errorf("usbhid: %s: failed to get input report: 0x%08x", d.path, result)
-		} else if d.extra.inputBuffer == nil {
-			res = fmt.Errorf("usbhid: %s: failed to get input report: buffer is nil", d.path)
-		} else {
-			res = append([]byte{}, d.extra.inputBuffer[:reportLength]...)
-		}
+	if d.extra.inputClosed {
+		return
+	}
 
-		select {
-		case d.extra.inputCh <- res:
-		default:
-		}
+	ctx := inputCtx{}
+	if result != kIOReturnSuccess {
+		ctx.err = fmt.Errorf("usbhid: %s: failed to get input report: 0x%08x", d.path, result)
+	} else if d.extra.inputBuffer == nil {
+		ctx.err = fmt.Errorf("usbhid: %s: failed to get input report: buffer is nil", d.path)
+	} else {
+		ctx.buf = append([]byte{}, d.extra.inputBuffer[:reportLength]...)
+	}
+
+	select {
+	case d.extra.inputCh <- ctx:
+	default:
 	}
 }
 
@@ -328,7 +335,7 @@ func (d *Device) open(lock bool) error {
 		return fmt.Errorf("usbhid: %s: %w: 0x%08x", d.path, ErrDeviceFailedToOpen, rv)
 	}
 
-	wait := make(chan interface{})
+	wait := make(chan struct{})
 
 	go func() {
 		runtime.LockOSThread()
@@ -336,13 +343,13 @@ func (d *Device) open(lock bool) error {
 
 		d.extra.runloop = _CFRunLoopGetCurrent()
 		d.extra.inputBuffer = make([]byte, d.reportInputLength+1)
-		d.extra.inputCh = make(chan interface{}, 1024)
+		d.extra.inputCh = make(chan inputCtx)
 
 		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**uintptr)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
 		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), purego.NewCallback(inputCallback), unsafe.Pointer(d))
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, purego.NewCallback(removalCallback), unsafe.Pointer(d))
 
-		wait <- nil
+		wait <- struct{}{}
 
 		_CFRunLoopRun()
 
@@ -394,15 +401,14 @@ func (d *Device) close() error {
 func (d *Device) getInputReport() (byte, []byte, error) {
 	select {
 	case result := <-d.extra.inputCh:
-		if err, ok := result.(error); ok {
-			return 0, nil, err
+		if result.err != nil {
+			return 0, nil, result.err
 		}
-		rv := result.([]byte)
 
 		if d.reportWithId {
-			return rv[0], rv[1:], nil
+			return result.buf[0], result.buf[1:], nil
 		}
-		return 0, rv[:], nil
+		return 0, result.buf[:], nil
 
 	case <-d.extra.disconnectCh:
 		if err := d.close(); err != nil {
