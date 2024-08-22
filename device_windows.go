@@ -7,7 +7,6 @@ package usbhid
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"path"
 	"strings"
@@ -225,10 +224,6 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
-	if d.extra.file != nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
-	}
-
 	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
 	if err != nil {
 		return err
@@ -243,10 +238,6 @@ func (d *Device) open(lock bool) error {
 }
 
 func (d *Device) lock() error {
-	if d.extra.file == nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
-	}
-
 	hash := sha1.Sum([]byte(d.path))
 	lockFile := path.Join(os.TempDir(), "usbhid-"+hex.EncodeToString(hash[:]))
 	if maxPath := 260 - len(".lock") - 1; len(lockFile) > maxPath {
@@ -277,7 +268,7 @@ func (d *Device) lock() error {
 
 	if err != nil {
 		if errno, ok := err.(syscall.Errno); ok && errno == kERROR_LOCK_VIOLATION {
-			return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceLocked)
+			return ErrDeviceLocked
 		}
 	}
 	return err
@@ -288,10 +279,6 @@ func (d *Device) isOpen() bool {
 }
 
 func (d *Device) close() error {
-	if d.extra.file == nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
-	}
-
 	if err := d.extra.file.Close(); err != nil {
 		return err
 	}

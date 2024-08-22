@@ -5,7 +5,6 @@
 package usbhid
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,10 +111,6 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
-	if d.extra.file != nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
-	}
-
 	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
 	if err != nil {
 		return err
@@ -125,7 +120,7 @@ func (d *Device) open(lock bool) error {
 
 	if lock {
 		if err := syscall.Flock(int(d.extra.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == syscall.EWOULDBLOCK {
-			return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceLocked)
+			return ErrDeviceLocked
 		}
 	}
 	return nil
@@ -136,10 +131,6 @@ func (d *Device) isOpen() bool {
 }
 
 func (d *Device) close() error {
-	if d.extra.file == nil {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
-	}
-
 	if err := d.extra.file.Close(); err != nil {
 		return err
 	}

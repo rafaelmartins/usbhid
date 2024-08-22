@@ -6,6 +6,7 @@ package usbhid
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -140,6 +141,11 @@ func init() {
 	purego.RegisterLibFunc(&_IORegistryEntryGetPath, iokit, "IORegistryEntryGetPath")
 	purego.RegisterLibFunc(&_IORegistryEntryGetRegistryEntryID, iokit, "IORegistryEntryGetRegistryEntryID")
 	purego.RegisterLibFunc(&_IORegistryEntryFromPath, iokit, "IORegistryEntryFromPath")
+
+	mgr = _IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone)
+	if rv := _IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone); rv != kIOReturnSuccess {
+		panic("failed to create iohid manager")
+	}
 }
 
 func byteSliceToString(b []byte) string {
@@ -158,12 +164,6 @@ func cfstringToString(str uintptr) string {
 }
 
 func enumerate() ([]*Device, error) {
-	if mgr == 0 {
-		mgr = _IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone)
-		if rv := _IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone); rv != kIOReturnSuccess {
-			return nil, fmt.Errorf("usbhid: %w: 0x%08x", ErrHIDManagerOpen, rv)
-		}
-	}
 	_IOHIDManagerSetDeviceMatching(mgr, 0)
 
 	device_set := _IOHIDManagerCopyDevices(mgr)
@@ -283,9 +283,9 @@ func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportTyp
 
 	ctx := inputCtx{}
 	if result != kIOReturnSuccess {
-		ctx.err = fmt.Errorf("usbhid: %s: failed to get input report: 0x%08x", d.path, result)
+		ctx.err = fmt.Errorf("0x%08x", result)
 	} else if d.extra.inputBuffer == nil {
-		ctx.err = fmt.Errorf("usbhid: %s: failed to get input report: buffer is nil", d.path)
+		ctx.err = errors.New("buffer is nil")
 	} else {
 		ctx.buf = append([]byte{}, d.extra.inputBuffer[:reportLength]...)
 	}
@@ -305,10 +305,6 @@ func removalCallback(context unsafe.Pointer, result int, sender uintptr) {
 }
 
 func (d *Device) open(lock bool) error {
-	if d.extra.file != 0 {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsOpen)
-	}
-
 	d.extra.mtx.Lock()
 	defer d.extra.mtx.Unlock()
 
@@ -316,13 +312,13 @@ func (d *Device) open(lock bool) error {
 	copy(pathB[:], d.path)
 	entry := _IORegistryEntryFromPath(0, pathB)
 	if entry == 0 {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceFailedToOpen)
+		return errors.New("failed to lookup io registry entry from path")
 	}
 	defer _IOObjectRelease(entry)
 
 	d.extra.file = _IOHIDDeviceCreate(kCFAllocatorDefault, entry)
 	if d.extra.file == 0 {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceFailedToOpen)
+		return errors.New("failed to create iohid device")
 	}
 
 	if lock {
@@ -330,9 +326,9 @@ func (d *Device) open(lock bool) error {
 	}
 	if rv := _IOHIDDeviceOpen(d.extra.file, d.extra.options); rv != kIOReturnSuccess {
 		if rv == kIOReturnExclusiveAccess {
-			return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceLocked)
+			return ErrDeviceLocked
 		}
-		return fmt.Errorf("usbhid: %s: %w: 0x%08x", d.path, ErrDeviceFailedToOpen, rv)
+		return fmt.Errorf("0x%08x", rv)
 	}
 
 	wait := make(chan struct{})
@@ -369,13 +365,6 @@ func (d *Device) isOpen() bool {
 }
 
 func (d *Device) close() error {
-	if d.extra.file == 0 {
-		if d.extra.disconnect {
-			return nil
-		}
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
-	}
-
 	if !d.extra.disconnect {
 		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), 0, nil)
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, 0, nil)
@@ -388,7 +377,7 @@ func (d *Device) close() error {
 
 	if !d.extra.disconnect {
 		if rv := _IOHIDDeviceClose(d.extra.file, d.extra.options); rv != kIOReturnSuccess {
-			return fmt.Errorf("usbhid: %s: %w: 0x%08x", d.path, ErrDeviceFailedToClose, rv)
+			return fmt.Errorf("0x%08x", rv)
 		}
 	}
 
@@ -414,34 +403,25 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 		if err := d.close(); err != nil {
 			return 0, nil, err
 		}
-		return 0, nil, fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
+		return 0, nil, ErrDeviceIsClosed
 	}
 }
 
 type resultCtx struct {
-	device *Device
-	op     string
-	len    int64
-	err    chan error
+	len int64
+	err chan error
 }
 
 func resultCallback(context unsafe.Pointer, result int, sender uintptr, reportType uint, reportId uint32, report uintptr, reportLength int64) {
 	ctx := (*resultCtx)(context)
 
-	var err error
 	if result != kIOReturnSuccess {
-		typ := "report"
-		switch reportType {
-		case kIOHIDReportTypeOutput:
-			typ = "output report"
-		case kIOHIDReportTypeFeature:
-			typ = "feature report"
-		}
-		err = fmt.Errorf("usbhid: %s: failed to %s %s: 0x%08x", ctx.device.path, ctx.op, typ, result)
+		ctx.len = 0
+		ctx.err <- fmt.Errorf("0x%08x", result)
 	}
 
 	ctx.len = reportLength
-	ctx.err <- err
+	ctx.err <- nil
 }
 
 func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
@@ -449,13 +429,11 @@ func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
 		if err := d.close(); err != nil {
 			return err
 		}
-		return fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
+		return ErrDeviceIsClosed
 	}
 
 	ctx := &resultCtx{
-		device: d,
-		op:     "set",
-		err:    make(chan error),
+		err: make(chan error),
 	}
 	buf := append([]byte{}, data...)
 	if d.reportWithId {
@@ -479,18 +457,16 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 		if err := d.close(); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("usbhid: %s: %w: disconnected", d.path, ErrDeviceIsNotOpen)
+		return nil, ErrDeviceIsClosed
 	}
 
 	ctx := &resultCtx{
-		device: d,
-		op:     "get",
-		err:    make(chan error),
+		err: make(chan error),
 	}
 	buf := make([]byte, d.reportFeatureLength+1)
 	l := int64(d.reportFeatureLength + 1)
 	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l, 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
-		return nil, fmt.Errorf("usbhid: %s: failed to register callback to get feature report: 0x%08x", d.path, rv)
+		return nil, fmt.Errorf("failed to submit request: 0x%08x", rv)
 	}
 
 	if err := <-ctx.err; err != nil {

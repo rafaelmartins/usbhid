@@ -16,15 +16,19 @@ import (
 // Errors returned from usbhid package may be tested against these errors
 // with errors.Is.
 var (
-	ErrDeviceIsOpen           = errors.New("device is open")
-	ErrDeviceIsNotOpen        = errors.New("device is not open")
-	ErrNoDeviceFound          = errors.New("no device found")
-	ErrMoreThanOneDeviceFound = errors.New("more than one device found")
-	ErrDeviceLocked           = errors.New("device is locked by another application")
-	ErrReportIsTooBig         = errors.New("report is too big")
-	ErrDeviceFailedToOpen     = errors.New("failed to open device")
-	ErrDeviceFailedToClose    = errors.New("failed to close device")
-	ErrHIDManagerOpen         = errors.New("failed to open HID manager")
+	ErrDeviceEnumerationFailed = errors.New("usb hid device enumeration failed")
+	ErrDeviceFailedToClose     = errors.New("usb hid device failed to close")
+	ErrDeviceFailedToOpen      = errors.New("usb hid device failed to open")
+	ErrDeviceIsClosed          = errors.New("usb hid device is closed")
+	ErrDeviceIsOpen            = errors.New("usb hid device is open")
+	ErrDeviceLocked            = errors.New("usb hid device is locked by another application")
+	ErrGetFeatureReportFailed  = errors.New("get usb hid feature report failed")
+	ErrGetInputReportFailed    = errors.New("get usb hid input report failed")
+	ErrMoreThanOneDeviceFound  = errors.New("more than one usb hid device found")
+	ErrNoDeviceFound           = errors.New("no usb hid device found")
+	ErrReportBufferOverflow    = errors.New("usb hid report buffer overflow")
+	ErrSetFeatureReportFailed  = errors.New("set usb hid feature report failed")
+	ErrSetOutputReportFailed   = errors.New("set usb hid output report failed")
 )
 
 // Device is an opaque structure that represents a USB HID device connected
@@ -57,7 +61,7 @@ type DeviceFilterFunc func(*Device) bool
 func Enumerate(f DeviceFilterFunc) ([]*Device, error) {
 	devices, err := enumerate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrDeviceEnumerationFailed, err)
 	}
 
 	if f == nil {
@@ -86,9 +90,9 @@ func Get(f DeviceFilterFunc, open bool, lock bool) (*Device, error) {
 	}
 
 	if l := len(devices); l == 0 {
-		return nil, fmt.Errorf("usbhid: %w", ErrNoDeviceFound)
+		return nil, ErrNoDeviceFound
 	} else if l > 1 {
-		return nil, fmt.Errorf("usbhid: %w", ErrMoreThanOneDeviceFound)
+		return nil, ErrMoreThanOneDeviceFound
 	}
 
 	d := devices[0]
@@ -102,9 +106,33 @@ func Get(f DeviceFilterFunc, open bool, lock bool) (*Device, error) {
 	return devices[0], nil
 }
 
+func (d *Device) errorId() string {
+	rv := fmt.Sprintf("vid=0x%04x; pid=0x%04x", d.vendorId, d.productId)
+	if d.manufacturer != "" {
+		rv += fmt.Sprintf("; mfr=%q", d.manufacturer)
+	}
+	if d.product != "" {
+		rv += fmt.Sprintf("; prod=%q", d.product)
+	}
+	if d.serialNumber != "" {
+		rv += fmt.Sprintf("; sn=%q", d.serialNumber)
+	}
+	return rv
+}
+
 // Open opens the USB HID device for usage.
 func (d *Device) Open(lock bool) error {
-	return d.open(lock)
+	if d.isOpen() {
+		return fmt.Errorf("%w [%s]", ErrDeviceIsOpen, d.errorId())
+	}
+
+	if err := d.open(lock); err != nil {
+		if err == ErrDeviceLocked {
+			return fmt.Errorf("%w [%s]", ErrDeviceLocked, d.errorId())
+		}
+		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToOpen, d.errorId(), err)
+	}
+	return nil
 }
 
 // IsOpen checks if the USB HID device is open and available for usage
@@ -114,7 +142,14 @@ func (d *Device) IsOpen() bool {
 
 // Close closes the USB HID device
 func (d *Device) Close() error {
-	return d.close()
+	if !d.isOpen() {
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+	}
+
+	if err := d.close(); err != nil {
+		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToClose, d.errorId(), err)
+	}
+	return nil
 }
 
 // GetInputReport reads an input report from the USB HID device.
@@ -122,10 +157,14 @@ func (d *Device) Close() error {
 // a slice of bytes with the report content, and an error (or nil).
 func (d *Device) GetInputReport() (byte, []byte, error) {
 	if !d.isOpen() {
-		return 0, nil, fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+		return 0, nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
 	}
 
-	return d.getInputReport()
+	id, buf, err := d.getInputReport()
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w [%s]: %w", ErrGetInputReportFailed, d.errorId(), err)
+	}
+	return id, buf, nil
 }
 
 // SetOutputReport writes an output report to the USB HID device.
@@ -135,14 +174,17 @@ func (d *Device) GetInputReport() (byte, []byte, error) {
 // an error is returned.
 func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 	if !d.isOpen() {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
 	}
 
 	if len(data) > int(d.reportOutputLength) {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrReportIsTooBig)
+		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d.errorId())
 	}
 
-	return d.setOutputReport(reportId, data)
+	if err := d.setOutputReport(reportId, data); err != nil {
+		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetOutputReportFailed, reportId, d.errorId(), err)
+	}
+	return nil
 }
 
 // GetFeatureReport reads a feature report from the USB HID device.
@@ -151,10 +193,14 @@ func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 // content and an error (or nil).
 func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 	if !d.isOpen() {
-		return nil, fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+		return nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
 	}
 
-	return d.getFeatureReport(reportId)
+	buf, err := d.getFeatureReport(reportId)
+	if err != nil {
+		return nil, fmt.Errorf("%w [rid=%d; %s]: %w", ErrGetFeatureReportFailed, reportId, d.errorId(), err)
+	}
+	return buf, nil
 }
 
 // SetFeatureReport writes an output report to the USB HID device.
@@ -164,14 +210,17 @@ func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 // an error is returned.
 func (d *Device) SetFeatureReport(reportId byte, data []byte) error {
 	if !d.isOpen() {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrDeviceIsNotOpen)
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
 	}
 
 	if len(data) > int(d.reportFeatureLength) {
-		return fmt.Errorf("usbhid: %s: %w", d.path, ErrReportIsTooBig)
+		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d.errorId())
 	}
 
-	return d.setFeatureReport(reportId, data)
+	if err := d.setFeatureReport(reportId, data); err != nil {
+		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetFeatureReportFailed, reportId, d.errorId(), err)
+	}
+	return nil
 }
 
 // GetInputReportLength returns the data size of an input report in bytes.
