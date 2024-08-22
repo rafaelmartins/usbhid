@@ -82,7 +82,7 @@ func ioc(dir byte, typ byte, nr byte, size uint16) uint32 {
 func ioctl(fd uintptr, request uint, arg uintptr) (int, error) {
 	rv, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(request), arg)
 	if errno != 0 {
-		return 0, fmt.Errorf("usbhid: ioctl: 0x%x: %s", request, errno)
+		return 0, fmt.Errorf("ioctl failed: 0x%x: %s", request, errno)
 	}
 	return int(rv), nil
 }
