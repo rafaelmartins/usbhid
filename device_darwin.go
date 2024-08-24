@@ -88,6 +88,10 @@ var (
 	_IORegistryEntryGetPath                 func(entry uint32, plane []byte, path []byte) int
 	_IORegistryEntryGetRegistryEntryID      func(entry uint32, entryID *uint64) int
 	_IORegistryEntryFromPath                func(mainPort uint32, path []byte) uint32
+
+	inputCallbackPtr   = purego.NewCallback(inputCallback)
+	removalCallbackPtr = purego.NewCallback(removalCallback)
+	resultCallbackPtr  = purego.NewCallback(resultCallback)
 )
 
 func init() {
@@ -342,8 +346,8 @@ func (d *Device) open(lock bool) error {
 		d.extra.inputCh = make(chan inputCtx)
 
 		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**uintptr)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), purego.NewCallback(inputCallback), unsafe.Pointer(d))
-		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, purego.NewCallback(removalCallback), unsafe.Pointer(d))
+		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), inputCallbackPtr, unsafe.Pointer(d))
+		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, removalCallbackPtr, unsafe.Pointer(d))
 
 		wait <- struct{}{}
 
@@ -439,7 +443,7 @@ func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
 	if d.reportWithId {
 		buf = append([]byte{reportId}, buf...)
 	}
-	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, int64(reportId), buf, int64(len(buf)), 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx))
+	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, int64(reportId), buf, int64(len(buf)), 0, resultCallbackPtr, unsafe.Pointer(ctx))
 
 	return <-ctx.err
 }
@@ -465,7 +469,7 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	}
 	buf := make([]byte, d.reportFeatureLength+1)
 	l := int64(d.reportFeatureLength + 1)
-	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l, 0, purego.NewCallback(resultCallback), unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
+	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l, 0, resultCallbackPtr, unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
 		return nil, fmt.Errorf("failed to submit request: 0x%08x", rv)
 	}
 
