@@ -15,10 +15,47 @@ import (
 	"github.com/ebitengine/purego"
 )
 
+type (
+	_io_name_t           []byte
+	_io_object_t         = _mach_port_t
+	_io_registry_entry_t = _io_object_t
+	_io_service_t        = _io_object_t
+	_io_string_t         []byte
+	_kern_return_t       int32
+	_mach_port_t         uint32
+)
+
+type (
+	_CFAllocatorRef  uintptr
+	_CFDataRef       uintptr
+	_CFDictionaryRef uintptr
+	_CFIndex         int64
+	_CFNumberRef     uintptr
+	_CFNumberType    = _CFIndex
+	_CFRange         struct {
+		location _CFIndex
+		length   _CFIndex
+	}
+	_CFRunLoopRef     uintptr
+	_CFSetRef         uintptr
+	_CFStringEncoding uint32
+	_CFStringRef      uintptr
+	_CFTimeInterval   float64
+	_CFTypeRef        uintptr
+)
+
+type (
+	_IOHIDDeviceRef  uintptr
+	_IOHIDManagerRef uintptr
+	_IOHIDReportType uint32
+	_IOOptionBits    uint32
+	_IOReturn        = _kern_return_t
+)
+
 type deviceExtra struct {
-	file    uintptr
-	options uint32
-	runloop uintptr
+	file    _IOHIDDeviceRef
+	options _IOOptionBits
+	runloop _CFRunLoopRef
 
 	mtx          sync.Mutex
 	disconnect   bool
@@ -29,65 +66,66 @@ type deviceExtra struct {
 }
 
 const (
-	kCFAllocatorDefault uintptr = 0
+	kCFAllocatorDefault _CFAllocatorRef = 0
 
-	kCFNumberSInt16Type int64 = 2
+	kCFNumberSInt16Type _CFIndex = 2
 
-	kCFStringEncodingUTF8 uint32 = 0x08000100
-
-	kIOHIDOptionsTypeNone        uint32 = 0
-	kIOHIDOptionsTypeSeizeDevice uint32 = 1
-
-	kIOHIDReportTypeOutput  uint = 1
-	kIOHIDReportTypeFeature uint = 2
-
-	kIOReturnSuccess         int = 0
-	kIOReturnExclusiveAccess int = 0xe00002c5
+	kCFStringEncodingUTF8 _CFStringEncoding = 0x08000100
 )
 
-type _CFRange struct {
-	location int64
-	length   int64
-}
+var (
+	_CFDataGetBytes            func(data _CFDataRef, rang _CFRange, buffer []byte)
+	_CFDataGetLength           func(data _CFDataRef) _CFIndex
+	_CFNumberGetValue          func(number _CFNumberRef, theType _CFNumberType, valuePtr unsafe.Pointer) bool
+	_CFRelease                 func(cf _CFTypeRef)
+	_CFRunLoopGetCurrent       func() _CFRunLoopRef
+	_CFRunLoopRun              func()
+	_CFRunLoopStop             func(runLoop _CFRunLoopRef)
+	_CFSetGetCount             func(theSet _CFSetRef) _CFIndex
+	_CFSetGetValues            func(theSet _CFSetRef, value unsafe.Pointer)
+	_CFStringCreateWithCString func(alloc _CFAllocatorRef, cstr []byte, encoding _CFStringEncoding) _CFStringRef
+	_CFStringGetCString        func(theString _CFStringRef, buffer []byte, encoding _CFStringEncoding) bool
+	_CFStringGetLength         func(theString _CFStringRef) _CFIndex
+)
+
+var _kCFRunLoopDefaultMode uintptr
+
+const (
+	kIOHIDOptionsTypeNone        _IOOptionBits = 0
+	kIOHIDOptionsTypeSeizeDevice _IOOptionBits = 1
+
+	kIOHIDReportTypeOutput  _IOHIDReportType = 1
+	kIOHIDReportTypeFeature _IOHIDReportType = 2
+
+	kIOReturnSuccess         _IOReturn = 0
+	kIOReturnExclusiveAccess _IOReturn = -0x1ffffd3b
+)
 
 var (
-	mgr uintptr
+	_IOHIDDeviceClose                       func(device _IOHIDDeviceRef, options _IOOptionBits) _IOReturn
+	_IOHIDDeviceCreate                      func(allocator _CFAllocatorRef, service _io_service_t) _IOHIDDeviceRef
+	_IOHIDDeviceGetProperty                 func(device _IOHIDDeviceRef, key _CFStringRef) _CFTypeRef
+	_IOHIDDeviceGetReportWithCallback       func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportId _CFIndex, report []byte, pReportLength *_CFIndex, timeout _CFTimeInterval, callback uintptr, context unsafe.Pointer) _IOReturn
+	_IOHIDDeviceGetService                  func(device _IOHIDDeviceRef) _io_service_t
+	_IOHIDDeviceOpen                        func(device _IOHIDDeviceRef, options _IOOptionBits) _IOReturn
+	_IOHIDDeviceRegisterInputReportCallback func(device _IOHIDDeviceRef, report unsafe.Pointer, reportLength _CFIndex, callback uintptr, context unsafe.Pointer)
+	_IOHIDDeviceRegisterRemovalCallback     func(device _IOHIDDeviceRef, callback uintptr, context unsafe.Pointer)
+	_IOHIDDeviceScheduleWithRunLoop         func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
+	_IOHIDDeviceSetReportWithCallback       func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportID _CFIndex, report []byte, reportLength _CFIndex, timeout _CFTimeInterval, callback uintptr, context unsafe.Pointer)
+	_IOHIDDeviceUnscheduleFromRunLoop       func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
+	_IOHIDManagerClose                      func(manager _IOHIDManagerRef, options _IOOptionBits) _IOReturn
+	_IOHIDManagerCopyDevices                func(manager _IOHIDManagerRef) _CFSetRef
+	_IOHIDManagerCreate                     func(allocator _CFAllocatorRef, options _IOOptionBits) _IOHIDManagerRef
+	_IOHIDManagerOpen                       func(manager _IOHIDManagerRef, options _IOOptionBits) _IOReturn
+	_IOHIDManagerSetDeviceMatching          func(manager _IOHIDManagerRef, matching _CFDictionaryRef)
+	_IOObjectRelease                        func(object _io_object_t) _kern_return_t
+	_IORegistryEntryGetPath                 func(entry _io_registry_entry_t, plane _io_name_t, path _io_string_t) _kern_return_t
+	_IORegistryEntryGetRegistryEntryID      func(entry _io_registry_entry_t, entryID *uint64) _kern_return_t
+	_IORegistryEntryFromPath                func(mainPort _mach_port_t, path _io_string_t) _io_registry_entry_t
+)
 
-	_kCFRunLoopDefaultMode uintptr
-
-	_CFDataGetBytes            func(data uintptr, rang _CFRange, buffer []byte)
-	_CFDataGetLength           func(data uintptr) int64
-	_CFNumberGetValue          func(number uintptr, theType int64, valuePtr unsafe.Pointer) bool
-	_CFRelease                 func(cf uintptr)
-	_CFRunLoopGetCurrent       func() uintptr
-	_CFRunLoopRun              func()
-	_CFRunLoopStop             func(runLoop uintptr)
-	_CFSetGetCount             func(set uintptr) int
-	_CFSetGetValues            func(set uintptr, value unsafe.Pointer) uintptr
-	_CFStringCreateWithCString func(alloc uintptr, cstr []byte, encoding uint32) uintptr
-	_CFStringGetCString        func(theString uintptr, buffer []byte, encoding uint32) bool
-	_CFStringGetLength         func(theString uintptr) int64
-
-	_IOHIDDeviceClose                       func(device uintptr, options uint32) int
-	_IOHIDDeviceCreate                      func(allocator uintptr, service uint32) uintptr
-	_IOHIDDeviceGetProperty                 func(device uintptr, key uintptr) uintptr
-	_IOHIDDeviceGetReportWithCallback       func(device uintptr, reportType uint, reportId int64, report []byte, pReportLength *int64, timeout float64, callback uintptr, context unsafe.Pointer) int
-	_IOHIDDeviceGetService                  func(device uintptr) uint32
-	_IOHIDDeviceOpen                        func(device uintptr, options uint32) int
-	_IOHIDDeviceRegisterInputReportCallback func(device uintptr, report unsafe.Pointer, reportLength int64, callback uintptr, context unsafe.Pointer)
-	_IOHIDDeviceRegisterRemovalCallback     func(device uintptr, callback uintptr, context unsafe.Pointer)
-	_IOHIDDeviceScheduleWithRunLoop         func(device uintptr, runLoop uintptr, runLoopMode uintptr)
-	_IOHIDDeviceSetReportWithCallback       func(device uintptr, reportType uint, reportID int64, report []byte, reportLength int64, timeout float64, callback uintptr, context unsafe.Pointer)
-	_IOHIDDeviceUnscheduleFromRunLoop       func(device uintptr, runLoop uintptr, runLoopMode uintptr)
-	_IOHIDManagerClose                      func(manager uintptr, options uint32) int
-	_IOHIDManagerCopyDevices                func(manager uintptr) uintptr
-	_IOHIDManagerCreate                     func(allocator uintptr, options uint32) uintptr
-	_IOHIDManagerOpen                       func(manager uintptr, options uint32) int
-	_IOHIDManagerSetDeviceMatching          func(manager uintptr, matching uintptr)
-	_IOObjectRelease                        func(object uint32) int
-	_IORegistryEntryGetPath                 func(entry uint32, plane []byte, path []byte) int
-	_IORegistryEntryGetRegistryEntryID      func(entry uint32, entryID *uint64) int
-	_IORegistryEntryFromPath                func(mainPort uint32, path []byte) uint32
+var (
+	mgr _IOHIDManagerRef
 
 	inputCallbackPtr   = purego.NewCallback(inputCallback)
 	removalCallbackPtr = purego.NewCallback(removalCallback)
@@ -157,7 +195,7 @@ func byteSliceToString(b []byte) string {
 	return string(b)
 }
 
-func cfstringToString(str uintptr) string {
+func cfstringToString(str _CFStringRef) string {
 	buf := make([]byte, _CFStringGetLength(str)+1)
 	if _CFStringGetCString(str, buf[:], kCFStringEncodingUTF8) {
 		return byteSliceToString(buf[:])
@@ -166,14 +204,6 @@ func cfstringToString(str uintptr) string {
 }
 
 func enumerate() ([]*Device, error) {
-	_IOHIDManagerSetDeviceMatching(mgr, 0)
-
-	device_set := _IOHIDManagerCopyDevices(mgr)
-	defer _CFRelease(device_set)
-
-	devices := make([]uintptr, _CFSetGetCount(device_set))
-	_CFSetGetValues(device_set, unsafe.Pointer(&devices[0]))
-
 	sManufacturer := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Manufacturer"), kCFStringEncodingUTF8)
 	sProduct := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Product"), kCFStringEncodingUTF8)
 	sProductID := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ProductID"), kCFStringEncodingUTF8)
@@ -186,15 +216,23 @@ func enumerate() ([]*Device, error) {
 		panic("failed to allocate memory for property key strings")
 	}
 	defer func() {
-		_CFRelease(sManufacturer)
-		_CFRelease(sProduct)
-		_CFRelease(sProductID)
-		_CFRelease(sReportDescriptor)
-		_CFRelease(sSerialNumber)
-		_CFRelease(sTransport)
-		_CFRelease(sVendorID)
-		_CFRelease(sVersionNumber)
+		_CFRelease(_CFTypeRef(sManufacturer))
+		_CFRelease(_CFTypeRef(sProduct))
+		_CFRelease(_CFTypeRef(sProductID))
+		_CFRelease(_CFTypeRef(sReportDescriptor))
+		_CFRelease(_CFTypeRef(sSerialNumber))
+		_CFRelease(_CFTypeRef(sTransport))
+		_CFRelease(_CFTypeRef(sVendorID))
+		_CFRelease(_CFTypeRef(sVersionNumber))
 	}()
+
+	_IOHIDManagerSetDeviceMatching(mgr, 0)
+
+	device_set := _IOHIDManagerCopyDevices(mgr)
+	defer _CFRelease(_CFTypeRef(device_set))
+
+	devices := make([]_IOHIDDeviceRef, _CFSetGetCount(device_set))
+	_CFSetGetValues(device_set, unsafe.Pointer(&devices[0]))
 
 	bIOService := make([]byte, 128)
 	copy(bIOService[:], "IOService")
@@ -213,7 +251,7 @@ func enumerate() ([]*Device, error) {
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sTransport); prop != 0 {
-			if transport := cfstringToString(prop); transport != "USB" {
+			if transport := cfstringToString(_CFStringRef(prop)); transport != "USB" {
 				continue
 			}
 		} else {
@@ -229,34 +267,34 @@ func enumerate() ([]*Device, error) {
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sVendorID); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.vendorId))
+			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.vendorId))
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sProductID); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.productId))
+			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.productId))
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sVersionNumber); prop != 0 {
-			_CFNumberGetValue(prop, kCFNumberSInt16Type, unsafe.Pointer(&dev.version))
+			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.version))
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sManufacturer); prop != 0 {
-			dev.manufacturer = cfstringToString(prop)
+			dev.manufacturer = cfstringToString(_CFStringRef(prop))
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sProduct); prop != 0 {
-			dev.product = cfstringToString(prop)
+			dev.product = cfstringToString(_CFStringRef(prop))
 		}
 
 		if prop := _IOHIDDeviceGetProperty(device, sSerialNumber); prop != 0 {
-			dev.serialNumber = cfstringToString(prop)
+			dev.serialNumber = cfstringToString(_CFStringRef(prop))
 		}
 
 		descriptor := []byte{}
 		if prop := _IOHIDDeviceGetProperty(device, sReportDescriptor); prop != 0 {
-			l := _CFDataGetLength(prop)
+			l := _CFDataGetLength(_CFDataRef(prop))
 			buf := make([]byte, l)
-			_CFDataGetBytes(prop, _CFRange{0, l}, buf[:])
+			_CFDataGetBytes(_CFDataRef(prop), _CFRange{0, l}, buf[:])
 			descriptor = append(descriptor, buf[:]...)
 		}
 
@@ -273,7 +311,7 @@ type inputCtx struct {
 	err error
 }
 
-func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportType uintptr, reportId uint32, report uintptr, reportLength int64) {
+func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
 	d := (*Device)(context)
 
 	d.extra.mtx.Lock()
@@ -298,7 +336,7 @@ func inputCallback(context unsafe.Pointer, result int, sender uintptr, reportTyp
 	}
 }
 
-func removalCallback(context unsafe.Pointer, result int, sender uintptr) {
+func removalCallback(context unsafe.Pointer, result _IOReturn, sender uintptr) {
 	d := (*Device)(context)
 
 	d.extra.disconnect = true
@@ -343,8 +381,8 @@ func (d *Device) open(lock bool) error {
 		d.extra.inputBuffer = make([]byte, d.reportInputLength+1)
 		d.extra.inputCh = make(chan inputCtx)
 
-		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**uintptr)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), inputCallbackPtr, unsafe.Pointer(d))
+		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
+		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), _CFIndex(d.reportInputLength+1), inputCallbackPtr, unsafe.Pointer(d))
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, removalCallbackPtr, unsafe.Pointer(d))
 
 		wait <- struct{}{}
@@ -368,9 +406,9 @@ func (d *Device) isOpen() bool {
 
 func (d *Device) close() error {
 	if !d.extra.disconnect {
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), int64(d.reportInputLength+1), 0, nil)
+		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), _CFIndex(d.reportInputLength+1), 0, nil)
 		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, 0, nil)
-		_IOHIDDeviceUnscheduleFromRunLoop(d.extra.file, d.extra.runloop, **(**uintptr)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
+		_IOHIDDeviceUnscheduleFromRunLoop(d.extra.file, d.extra.runloop, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
 	}
 
 	if d.extra.inputCh != nil && !d.extra.inputClosed {
@@ -383,7 +421,7 @@ func (d *Device) close() error {
 		}
 	}
 
-	_CFRelease(d.extra.file)
+	_CFRelease(_CFTypeRef(d.extra.file))
 	d.extra.file = 0
 
 	return nil
@@ -410,11 +448,11 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 }
 
 type resultCtx struct {
-	len int64
+	len _CFIndex
 	err chan error
 }
 
-func resultCallback(context unsafe.Pointer, result int, sender uintptr, reportType uint, reportId uint32, report uintptr, reportLength int64) {
+func resultCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
 	ctx := (*resultCtx)(context)
 
 	if result != kIOReturnSuccess {
@@ -426,7 +464,7 @@ func resultCallback(context unsafe.Pointer, result int, sender uintptr, reportTy
 	ctx.err <- nil
 }
 
-func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
+func (d *Device) setReport(typ _IOHIDReportType, reportId byte, data []byte) error {
 	if d.extra.disconnect {
 		if err := d.close(); err != nil {
 			return err
@@ -441,7 +479,7 @@ func (d *Device) setReport(typ uint, reportId byte, data []byte) error {
 	if d.reportWithId {
 		buf = append([]byte{reportId}, buf...)
 	}
-	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, int64(reportId), buf, int64(len(buf)), 0, resultCallbackPtr, unsafe.Pointer(ctx))
+	_IOHIDDeviceSetReportWithCallback(d.extra.file, typ, _CFIndex(reportId), buf, _CFIndex(len(buf)), 0, resultCallbackPtr, unsafe.Pointer(ctx))
 
 	return <-ctx.err
 }
@@ -466,8 +504,8 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 		err: make(chan error),
 	}
 	buf := make([]byte, d.reportFeatureLength+1)
-	l := int64(d.reportFeatureLength + 1)
-	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, int64(reportId), buf, &l, 0, resultCallbackPtr, unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
+	l := _CFIndex(d.reportFeatureLength + 1)
+	if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, _CFIndex(reportId), buf, &l, 0, resultCallbackPtr, unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
 		return nil, fmt.Errorf("failed to submit request: 0x%08x", rv)
 	}
 
