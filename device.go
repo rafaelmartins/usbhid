@@ -103,10 +103,11 @@ func Get(f DeviceFilterFunc, open bool, lock bool) (*Device, error) {
 		}
 	}
 
-	return devices[0], nil
+	return d, nil
 }
 
-func (d *Device) errorId() string {
+// String returns a platform-independent string representation of the device.
+func (d *Device) String() string {
 	rv := fmt.Sprintf("vid=0x%04x; pid=0x%04x", d.vendorId, d.productId)
 	if d.manufacturer != "" {
 		rv += fmt.Sprintf("; mfr=%q", d.manufacturer)
@@ -123,14 +124,14 @@ func (d *Device) errorId() string {
 // Open opens the USB HID device for usage.
 func (d *Device) Open(lock bool) error {
 	if d.isOpen() {
-		return fmt.Errorf("%w [%s]", ErrDeviceIsOpen, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrDeviceIsOpen, d)
 	}
 
 	if err := d.open(lock); err != nil {
 		if err == ErrDeviceLocked {
-			return fmt.Errorf("%w [%s]", ErrDeviceLocked, d.errorId())
+			return fmt.Errorf("%w [%s]", ErrDeviceLocked, d)
 		}
-		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToOpen, d.errorId(), err)
+		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToOpen, d, err)
 	}
 	return nil
 }
@@ -143,11 +144,11 @@ func (d *Device) IsOpen() bool {
 // Close closes the USB HID device
 func (d *Device) Close() error {
 	if !d.isOpen() {
-		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
 	}
 
 	if err := d.close(); err != nil {
-		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToClose, d.errorId(), err)
+		return fmt.Errorf("%w [%s]: %w", ErrDeviceFailedToClose, d, err)
 	}
 	return nil
 }
@@ -157,12 +158,12 @@ func (d *Device) Close() error {
 // a slice of bytes with the report content, and an error (or nil).
 func (d *Device) GetInputReport() (byte, []byte, error) {
 	if !d.isOpen() {
-		return 0, nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+		return 0, nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
 	}
 
 	id, buf, err := d.getInputReport()
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w [%s]: %w", ErrGetInputReportFailed, d.errorId(), err)
+		return 0, nil, fmt.Errorf("%w [%s]: %w", ErrGetInputReportFailed, d, err)
 	}
 	return id, buf, nil
 }
@@ -174,15 +175,15 @@ func (d *Device) GetInputReport() (byte, []byte, error) {
 // an error is returned.
 func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 	if !d.isOpen() {
-		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
 	}
 
 	if len(data) > int(d.reportOutputLength) {
-		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d)
 	}
 
 	if err := d.setOutputReport(reportId, data); err != nil {
-		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetOutputReportFailed, reportId, d.errorId(), err)
+		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetOutputReportFailed, reportId, d, err)
 	}
 	return nil
 }
@@ -193,12 +194,12 @@ func (d *Device) SetOutputReport(reportId byte, data []byte) error {
 // content and an error (or nil).
 func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 	if !d.isOpen() {
-		return nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+		return nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
 	}
 
 	buf, err := d.getFeatureReport(reportId)
 	if err != nil {
-		return nil, fmt.Errorf("%w [rid=%d; %s]: %w", ErrGetFeatureReportFailed, reportId, d.errorId(), err)
+		return nil, fmt.Errorf("%w [rid=%d; %s]: %w", ErrGetFeatureReportFailed, reportId, d, err)
 	}
 	return buf, nil
 }
@@ -210,15 +211,15 @@ func (d *Device) GetFeatureReport(reportId byte) ([]byte, error) {
 // an error is returned.
 func (d *Device) SetFeatureReport(reportId byte, data []byte) error {
 	if !d.isOpen() {
-		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
 	}
 
 	if len(data) > int(d.reportFeatureLength) {
-		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d.errorId())
+		return fmt.Errorf("%w [%s]", ErrReportBufferOverflow, d)
 	}
 
 	if err := d.setFeatureReport(reportId, data); err != nil {
-		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetFeatureReportFailed, reportId, d.errorId(), err)
+		return fmt.Errorf("%w [rid=%d; %s]: %w", ErrSetFeatureReportFailed, reportId, d, err)
 	}
 	return nil
 }
