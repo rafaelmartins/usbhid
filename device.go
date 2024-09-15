@@ -277,3 +277,13 @@ func (d *Device) Product() string {
 func (d *Device) SerialNumber() string {
 	return d.serialNumber
 }
+
+// UsagePage returns the usage page of the USB HID device.
+func (d *Device) UsagePage() uint16 {
+	return d.usagePage
+}
+
+// Usage returns the usage identifier of the USB HID device.
+func (d *Device) Usage() uint16 {
+	return d.usage
+}

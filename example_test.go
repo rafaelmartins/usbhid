@@ -18,6 +18,7 @@ func ExampleEnumerate() {
 		fmt.Printf("\tManufacturer:  %s\n", device.Manufacturer())
 		fmt.Printf("\tProduct:       %s\n", device.Product())
 		fmt.Printf("\tSerial Number: %s\n", device.SerialNumber())
+		fmt.Printf("\tUsage: 0x%02x/0x%02x\n", device.UsagePage(), device.Usage())
 	}
 }
 
