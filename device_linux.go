@@ -54,53 +54,61 @@ func enumerate() ([]*Device, error) {
 			return nil
 		}
 
-		d := &Device{}
-
-		d.vendorId, err = sysfsReadAsHexUint16(path, "idVendor")
+		vendorId, err := sysfsReadAsHexUint16(path, "idVendor")
 		if err != nil {
 			return nil
 		}
 
-		d.productId, err = sysfsReadAsHexUint16(path, "idProduct")
+		productId, err := sysfsReadAsHexUint16(path, "idProduct")
 		if err != nil {
 			return nil
 		}
 
-		d.version, err = sysfsReadAsHexUint16(path, "bcdDevice")
+		version, err := sysfsReadAsHexUint16(path, "bcdDevice")
 		if err != nil {
 			return nil
 		}
 
+		var manufacturer string
 		if m, err := sysfsReadAsString(path, "manufacturer"); err == nil {
-			d.manufacturer = m
+			manufacturer = m
 		}
 
+		var product string
 		if p, err := sysfsReadAsString(path, "product"); err == nil {
-			d.product = p
+			product = p
 		}
 
+		var serialNumber string
 		if s, err := sysfsReadAsString(path, "serial"); err == nil {
-			d.serialNumber = s
+			serialNumber = s
 		}
 
-		f, err := filepath.Glob(filepath.Join(path, "*", "*", "hidraw", "hidraw[0-9]*"))
-		if err != nil {
-			return nil
-		}
-		if len(f) != 1 {
-			return nil
-		}
-
-		hidpath := filepath.Dir(filepath.Dir(f[0]))
-		descriptor, err := sysfsReadAsBytes(hidpath, "report_descriptor")
+		files, err := filepath.Glob(filepath.Join(path, "*", "*", "hidraw", "hidraw[0-9]*"))
 		if err != nil {
 			return nil
 		}
 
-		d.path = filepath.Join("/dev", filepath.Base(f[0]))
-		d.usagePage, d.usage, d.reportInputLength, d.reportOutputLength, d.reportFeatureLength, d.reportWithId = hidParseReportDescriptor(descriptor)
+		for _, f := range files {
+			hidpath := filepath.Dir(filepath.Dir(f))
+			descriptor, err := sysfsReadAsBytes(hidpath, "report_descriptor")
+			if err != nil {
+				continue
+			}
 
-		rv = append(rv, d)
+			d := &Device{
+				path:         filepath.Join("/dev", filepath.Base(f)),
+				vendorId:     vendorId,
+				productId:    productId,
+				version:      version,
+				manufacturer: manufacturer,
+				product:      product,
+				serialNumber: serialNumber,
+			}
+			d.usagePage, d.usage, d.reportInputLength, d.reportOutputLength, d.reportFeatureLength, d.reportWithId = hidParseReportDescriptor(descriptor)
+
+			rv = append(rv, d)
+		}
 
 		return nil
 	}); err != nil {
