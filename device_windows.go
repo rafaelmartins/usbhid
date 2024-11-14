@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -97,9 +96,10 @@ const (
 	_IOCTL_HID_SET_FEATURE uint32 = 0x000b0191
 	_IOCTL_HID_GET_FEATURE uint32 = 0x000b0192
 
-	_ERROR_SUCCESS        uint32 = 0x00000000
-	_ERROR_LOCK_VIOLATION uint32 = 0x00000021
-	_ERROR_IO_PENDING     uint32 = 0x000003e5
+	_ERROR_SUCCESS             syscall.Errno = 0x00000000
+	_ERROR_LOCK_VIOLATION      syscall.Errno = 0x00000021
+	_ERROR_INSUFFICIENT_BUFFER syscall.Errno = 0x0000007a
+	_ERROR_IO_PENDING          syscall.Errno = 0x000003e5
 )
 
 var (
@@ -109,7 +109,7 @@ var (
 	_CloseHandle         = kernel32.NewProc("CloseHandle")
 	_DeviceIoControl     = kernel32.NewProc("DeviceIoControl")
 	_GetOverlappedResult = kernel32.NewProc("GetOverlappedResult")
-	_LockFileEx          = kernel32.NewProc("LockFileEx")
+	_LockFile            = kernel32.NewProc("LockFile")
 	_ReadFile            = kernel32.NewProc("ReadFile")
 	_WriteFile           = kernel32.NewProc("WriteFile")
 )
@@ -156,7 +156,7 @@ func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
 				if !match {
 					return 0, err
 				}
-				if uint32(errno) != _ERROR_SUCCESS {
+				if errno != _ERROR_SUCCESS {
 					return 0, errno
 				}
 			}
@@ -202,7 +202,7 @@ func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
 		if !match {
 			return 0, err
 		}
-		if uint32(errno) != _ERROR_SUCCESS && (ovl == nil || uint32(errno) != _ERROR_IO_PENDING) {
+		if errno != _ERROR_SUCCESS && (ovl == nil || errno != _ERROR_IO_PENDING) {
 			return 0, errno
 		}
 	}
@@ -214,7 +214,7 @@ func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
 			if !match {
 				return 0, err
 			}
-			if uint32(errno) != _ERROR_SUCCESS {
+			if errno != _ERROR_SUCCESS {
 				return 0, errno
 			}
 		}
@@ -277,7 +277,7 @@ func enumerate() ([]*Device, error) {
 
 		reqSize := uintptr(0)
 		if _, err := call(_SetupDiGetDeviceInterfaceDetailW, devInfo, unsafe.Pointer(&itf), null, 0, unsafe.Pointer(&reqSize), null); err != nil {
-			if errno, match := err.(syscall.Errno); match && errno != syscall.ERROR_INSUFFICIENT_BUFFER {
+			if errno, match := err.(syscall.Errno); match && errno != _ERROR_INSUFFICIENT_BUFFER {
 				continue
 			}
 		}
@@ -291,14 +291,8 @@ func enumerate() ([]*Device, error) {
 		}
 
 		pathW := detailBuf[unsafe.Offsetof(detail.devicePath)/unsafe.Sizeof(detailBuf[0]) : len(detailBuf)-1]
-		path := strings.TrimSpace(syscall.UTF16ToString(pathW))
 
 		d := func() *Device {
-			pathW, err := syscall.UTF16FromString(path)
-			if err != nil {
-				return nil
-			}
-
 			f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), 0, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, 0, null)
 			if err != nil {
 				return nil
@@ -311,7 +305,7 @@ func enumerate() ([]*Device, error) {
 			}
 
 			rv := &Device{
-				path:      path,
+				path:      syscall.UTF16ToString(pathW),
 				vendorId:  attr.vendorID,
 				productId: attr.productID,
 				version:   attr.version,
@@ -398,7 +392,7 @@ func (d *Device) lock() error {
 			return err
 		}
 
-		if _, err = call(_LockFileEx, f, _LOCKFILE_EXCLUSIVE_LOCK|_LOCKFILE_FAIL_IMMEDIATELY, 0, 0xffffffff, 0xffffffff, unsafe.Pointer(&syscall.Overlapped{})); err != nil {
+		if _, err = call(_LockFile, f, _LOCKFILE_EXCLUSIVE_LOCK|_LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0); err != nil {
 			if _, err_ := call(_CloseHandle, f); err_ != nil {
 				return err_
 			}
@@ -410,7 +404,7 @@ func (d *Device) lock() error {
 	}()
 
 	if err != nil {
-		if errno, match := err.(syscall.Errno); match && uint32(errno) == _ERROR_LOCK_VIOLATION {
+		if errno, match := err.(syscall.Errno); match && errno == _ERROR_LOCK_VIOLATION {
 			return ErrDeviceLocked
 		}
 	}
