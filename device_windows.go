@@ -7,6 +7,8 @@ package usbhid
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path"
 	"strings"
@@ -14,79 +16,44 @@ import (
 	"unsafe"
 )
 
-type deviceExtra struct {
-	file  *os.File
-	flock *os.File
+type overlapped struct {
+	n   uint32
+	ovl struct {
+		internal     uintptr
+		internalHigh uintptr
+		offset       uint32
+		offsetHigh   uint32
+		hEvent       uintptr
+	}
 }
 
-const (
-	kLOCKFILE_FAIL_IMMEDIATELY = 0x01
-	kLOCKFILE_EXCLUSIVE_LOCK   = 0x02
-	kERROR_LOCK_VIOLATION      = 0x21
-)
-
-var (
-	kernel32   = syscall.NewLazyDLL("kernel32.dll")
-	lockFileEx = kernel32.NewProc("LockFileEx")
-)
-
-const (
-	sDIGCF_PRESENT         = 0x02
-	sDIGCF_DEVICEINTERFACE = 0x10
-)
-
-const (
-	hHIDP_STATUS_SUCCESS uintptr = 0x00110000
-)
-
-var (
-	setupapi                         = syscall.NewLazyDLL("setupapi.dll")
-	setupDiDestroyDeviceInfoList     = setupapi.NewProc("SetupDiDestroyDeviceInfoList")
-	setupDiEnumDeviceInterfaces      = setupapi.NewProc("SetupDiEnumDeviceInterfaces")
-	setupDiGetClassDevsA             = setupapi.NewProc("SetupDiGetClassDevsA")
-	setupDiGetDeviceInterfaceDetailA = setupapi.NewProc("SetupDiGetDeviceInterfaceDetailA")
-)
-
-var (
-	hid                        = syscall.NewLazyDLL("hid.dll")
-	hidD_FreePreparsedData     = hid.NewProc("HidD_FreePreparsedData")
-	hidD_GetAttributes         = hid.NewProc("HidD_GetAttributes")
-	hidD_GetHidGuid            = hid.NewProc("HidD_GetHidGuid")
-	hidD_GetManufacturerString = hid.NewProc("HidD_GetManufacturerString")
-	hidD_GetPreparsedData      = hid.NewProc("HidD_GetPreparsedData")
-	hidD_GetProductString      = hid.NewProc("HidD_GetProductString")
-	hidD_GetSerialNumberString = hid.NewProc("HidD_GetSerialNumberString")
-	hidD_SetFeature            = hid.NewProc("HidD_SetFeature")
-	hidP_GetCaps               = hid.NewProc("HidP_GetCaps")
-)
-
-type gGUID struct {
+type _GUID struct {
 	data1 uint32
 	data2 uint16
 	data3 uint16
 	data4 [8]uint8
 }
 
-type sSP_DEVICE_INTERFACE_DATA struct {
+type _SP_DEVICE_INTERFACE_DATA struct {
 	cbSize   uint32
-	guid     gGUID
+	guid     _GUID
 	flags    uint32
 	reserved uintptr
 }
 
-type sSP_DEVICE_INTERFACE_DETAIL_DATA_A struct {
+type _SP_DEVICE_INTERFACE_DETAIL_DATA_W struct {
 	cbSize     uint32
-	devicePath [1]byte
+	devicePath [1]uint16
 }
 
-type hHIDD_ATTRIBUTES struct {
+type _HIDD_ATTRIBUTES struct {
 	size      uint32
 	vendorID  uint16
 	productID uint16
 	version   uint16
 }
 
-type hHIDP_CAPS struct {
+type _HIDP_CAPS struct {
 	usage                     uint16
 	usagePage                 uint16
 	inputReportByteLength     uint16
@@ -105,104 +72,271 @@ type hHIDP_CAPS struct {
 	numberFeatureDataIndices  uint16
 }
 
+type deviceExtra struct {
+	file      uintptr
+	flock     uintptr
+	flockPath string
+}
+
+const (
+	null uintptr = 0
+
+	_GENERIC_WRITE uint32 = 0x40000000
+	_GENERIC_READ  uint32 = 0x80000000
+
+	_OPEN_EXISTING uint32 = 0x00000003
+
+	_FILE_FLAG_OVERLAPPED uint32 = 0x40000000
+
+	_FILE_SHARE_READ  uint32 = 0x00000001
+	_FILE_SHARE_WRITE uint32 = 0x00000002
+
+	_LOCKFILE_FAIL_IMMEDIATELY uint32 = 0x00000001
+	_LOCKFILE_EXCLUSIVE_LOCK   uint32 = 0x00000002
+
+	_IOCTL_HID_SET_FEATURE uint32 = 0x000b0191
+	_IOCTL_HID_GET_FEATURE uint32 = 0x000b0192
+
+	_ERROR_SUCCESS        uint32 = 0x00000000
+	_ERROR_LOCK_VIOLATION uint32 = 0x00000021
+	_ERROR_IO_PENDING     uint32 = 0x000003e5
+)
+
+var (
+	kernel32             = syscall.NewLazyDLL("kernel32.dll")
+	_CreateEventW        = kernel32.NewProc("CreateEventW")
+	_CreateFileW         = kernel32.NewProc("CreateFileW")
+	_CloseHandle         = kernel32.NewProc("CloseHandle")
+	_DeviceIoControl     = kernel32.NewProc("DeviceIoControl")
+	_GetOverlappedResult = kernel32.NewProc("GetOverlappedResult")
+	_LockFileEx          = kernel32.NewProc("LockFileEx")
+	_ReadFile            = kernel32.NewProc("ReadFile")
+	_WriteFile           = kernel32.NewProc("WriteFile")
+)
+
+const (
+	_DIGCF_PRESENT         uint32 = 0x00000002
+	_DIGCF_DEVICEINTERFACE uint32 = 0x00000010
+)
+
+var (
+	setupapi                          = syscall.NewLazyDLL("setupapi.dll")
+	_SetupDiDestroyDeviceInfoList     = setupapi.NewProc("SetupDiDestroyDeviceInfoList")
+	_SetupDiEnumDeviceInterfaces      = setupapi.NewProc("SetupDiEnumDeviceInterfaces")
+	_SetupDiGetClassDevsW             = setupapi.NewProc("SetupDiGetClassDevsW")
+	_SetupDiGetDeviceInterfaceDetailW = setupapi.NewProc("SetupDiGetDeviceInterfaceDetailW")
+)
+
+const (
+	_HIDP_STATUS_SUCCESS uint32 = 0x00110000
+)
+
+var (
+	hid                         = syscall.NewLazyDLL("hid.dll")
+	_HidD_FreePreparsedData     = hid.NewProc("HidD_FreePreparsedData")
+	_HidD_GetAttributes         = hid.NewProc("HidD_GetAttributes")
+	_HidD_GetHidGuid            = hid.NewProc("HidD_GetHidGuid")
+	_HidD_GetManufacturerString = hid.NewProc("HidD_GetManufacturerString")
+	_HidD_GetPreparsedData      = hid.NewProc("HidD_GetPreparsedData")
+	_HidD_GetProductString      = hid.NewProc("HidD_GetProductString")
+	_HidD_GetSerialNumberString = hid.NewProc("HidD_GetSerialNumberString")
+	_HidP_GetCaps               = hid.NewProc("HidP_GetCaps")
+)
+
+func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
+	var ovl *overlapped
+
+	v := make([]uintptr, len(args))
+	for i, arg := range args {
+		switch arg := arg.(type) {
+		case *overlapped:
+			ev, _, err := _CreateEventW.Call(null, 0, 0, null)
+			if err != nil {
+				errno, match := err.(syscall.Errno)
+				if !match {
+					return 0, err
+				}
+				if uint32(errno) != _ERROR_SUCCESS {
+					return 0, errno
+				}
+			}
+			defer _CloseHandle.Call(ev)
+			if arg == nil {
+				return 0, errors.New("call: overlapped is nil")
+			}
+			ovl = arg
+			ovl.ovl.hEvent = ev
+			v[i] = uintptr(unsafe.Pointer(&ovl.ovl))
+		case uint8:
+			v[i] = uintptr(arg)
+		case uint16:
+			v[i] = uintptr(arg)
+		case uint32:
+			v[i] = uintptr(arg)
+		case uint64:
+			v[i] = uintptr(arg)
+		case uint:
+			v[i] = uintptr(arg)
+		case int8:
+			v[i] = uintptr(arg)
+		case int16:
+			v[i] = uintptr(arg)
+		case int32:
+			v[i] = uintptr(arg)
+		case int64:
+			v[i] = uintptr(arg)
+		case int:
+			v[i] = uintptr(arg)
+		case unsafe.Pointer:
+			v[i] = uintptr(arg)
+		case uintptr:
+			v[i] = arg
+		default:
+			return 0, fmt.Errorf("call: argument is not supported: %s", arg)
+		}
+	}
+
+	r, _, err := p.Call(v...)
+	if err != nil {
+		errno, match := err.(syscall.Errno)
+		if !match {
+			return 0, err
+		}
+		if uint32(errno) != _ERROR_SUCCESS && (ovl == nil || uint32(errno) != _ERROR_IO_PENDING) {
+			return 0, errno
+		}
+	}
+
+	if ovl != nil {
+		// the functions that accept OVERLAPPED always have a file handle as first argument
+		if _, _, err = _GetOverlappedResult.Call(v[0], uintptr(unsafe.Pointer(&ovl.ovl)), uintptr(unsafe.Pointer(&ovl.n)), 1); err != nil {
+			errno, match := err.(syscall.Errno)
+			if !match {
+				return 0, err
+			}
+			if uint32(errno) != _ERROR_SUCCESS {
+				return 0, errno
+			}
+		}
+	}
+
+	return r, nil
+}
+
+func ioctl(fd uintptr, req uint32, in []byte, out []byte) (int, error) {
+	var (
+		inb  unsafe.Pointer
+		outb unsafe.Pointer
+		inl  uint32
+		outl uint32
+		rv   uint32
+	)
+	if in != nil {
+		inb = unsafe.Pointer(&in[0])
+		inl = uint32(len(in))
+	}
+	if out != nil {
+		outb = unsafe.Pointer(&out[0])
+		outl = uint32(len(out))
+	}
+
+	ovl := overlapped{}
+	if _, err := call(_DeviceIoControl, fd, req, inb, inl, outb, outl, unsafe.Pointer(&rv), &ovl); err != nil {
+		return 0, err
+	}
+	return int(ovl.n), nil
+}
+
 func enumerate() ([]*Device, error) {
-	guid := gGUID{}
-	if _, _, err := hidD_GetHidGuid.Call(uintptr(unsafe.Pointer(&guid))); err != nil && err.(syscall.Errno) != 0 {
+	guid := _GUID{}
+	if _, err := call(_HidD_GetHidGuid, unsafe.Pointer(&guid)); err != nil {
 		return nil, err
 	}
 
-	devInfo, _, err := setupDiGetClassDevsA.Call(uintptr(unsafe.Pointer(&guid)), 0, 0, uintptr(sDIGCF_PRESENT|sDIGCF_DEVICEINTERFACE))
-	if err != nil && err.(syscall.Errno) != 0 {
+	devInfo, err := call(_SetupDiGetClassDevsW, unsafe.Pointer(&guid), null, null, _DIGCF_PRESENT|_DIGCF_DEVICEINTERFACE)
+	if err != nil {
 		return nil, err
 	}
-	defer setupDiDestroyDeviceInfoList.Call(devInfo)
+	defer call(_SetupDiDestroyDeviceInfoList, devInfo)
 
 	idx := uint32(0)
 	rv := []*Device{}
 
 	for {
-		itf := sSP_DEVICE_INTERFACE_DATA{}
+		itf := _SP_DEVICE_INTERFACE_DATA{}
 		itf.cbSize = uint32(unsafe.Sizeof(itf))
 
-		b, _, err := setupDiEnumDeviceInterfaces.Call(devInfo, 0, uintptr(unsafe.Pointer(&guid)), uintptr(idx), uintptr(unsafe.Pointer(&itf)))
+		b, err := call(_SetupDiEnumDeviceInterfaces, devInfo, null, unsafe.Pointer(&guid), idx, unsafe.Pointer(&itf))
 		idx++
 		if b == 0 {
 			break
 		}
-		if err != nil && err.(syscall.Errno) != 0 {
+		if err != nil {
 			continue
 		}
 
-		reqSize := uint32(0)
-		_, _, err = setupDiGetDeviceInterfaceDetailA.Call(devInfo, uintptr(unsafe.Pointer(&itf)), 0, uintptr(uint32(0)), uintptr(unsafe.Pointer(&reqSize)), 0)
-		if err != nil && err.(syscall.Errno) != syscall.ERROR_INSUFFICIENT_BUFFER {
+		reqSize := uintptr(0)
+		if _, err := call(_SetupDiGetDeviceInterfaceDetailW, devInfo, unsafe.Pointer(&itf), null, 0, unsafe.Pointer(&reqSize), null); err != nil {
+			if errno, match := err.(syscall.Errno); match && errno != syscall.ERROR_INSUFFICIENT_BUFFER {
+				continue
+			}
+		}
+
+		detailBuf := make([]uint16, reqSize/unsafe.Sizeof(uint16(0)))
+		detail := (*_SP_DEVICE_INTERFACE_DETAIL_DATA_W)(unsafe.Pointer(&detailBuf[0]))
+		detail.cbSize = uint32(unsafe.Sizeof(_SP_DEVICE_INTERFACE_DETAIL_DATA_W{}))
+
+		if _, err := call(_SetupDiGetDeviceInterfaceDetailW, devInfo, unsafe.Pointer(&itf), unsafe.Pointer(detail), reqSize, null, null); err != nil {
 			continue
 		}
 
-		detailBuf := make([]byte, reqSize)
-		detail := (*sSP_DEVICE_INTERFACE_DETAIL_DATA_A)(unsafe.Pointer(&detailBuf[0]))
-		detail.cbSize = uint32(unsafe.Sizeof(sSP_DEVICE_INTERFACE_DETAIL_DATA_A{}))
-
-		_, _, err = setupDiGetDeviceInterfaceDetailA.Call(devInfo, uintptr(unsafe.Pointer(&itf)), uintptr(unsafe.Pointer(detail)), uintptr(reqSize), 0, 0)
-		if err != nil && err.(syscall.Errno) != 0 {
-			continue
-		}
-
-		path := strings.TrimSpace(string(detailBuf[unsafe.Offsetof(detail.devicePath) : len(detailBuf)-1]))
+		pathW := detailBuf[unsafe.Offsetof(detail.devicePath)/unsafe.Sizeof(detailBuf[0]) : len(detailBuf)-1]
+		path := strings.TrimSpace(syscall.UTF16ToString(pathW))
 
 		d := func() *Device {
-			f, err := os.OpenFile(path, os.O_RDWR, 0755)
+			pathW, err := syscall.UTF16FromString(path)
 			if err != nil {
 				return nil
 			}
-			defer f.Close()
 
-			rv := &Device{
-				path: path,
-			}
-
-			attr := hHIDD_ATTRIBUTES{}
-			_, _, err = hidD_GetAttributes.Call(f.Fd(), uintptr(unsafe.Pointer(&attr)))
-			if err != nil && err.(syscall.Errno) != 0 {
+			f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), 0, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, 0, null)
+			if err != nil {
 				return nil
 			}
-			rv.vendorId = attr.vendorID
-			rv.productId = attr.productID
-			rv.version = attr.version
+			defer call(_CloseHandle, f)
 
-			buf := make([]uint16, 4092/2)
+			attr := _HIDD_ATTRIBUTES{}
+			if _, err := call(_HidD_GetAttributes, f, unsafe.Pointer(&attr)); err != nil {
+				return nil
+			}
 
-			_, _, err = hidD_GetManufacturerString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err != nil && err.(syscall.Errno) == 0 {
+			rv := &Device{
+				path:      path,
+				vendorId:  attr.vendorID,
+				productId: attr.productID,
+				version:   attr.version,
+			}
+			buf := make([]uint16, 4092/unsafe.Sizeof(uint16(0)))
+			if _, err := call(_HidD_GetManufacturerString, f, unsafe.Pointer(&buf[0]), len(buf)); err == nil {
 				rv.manufacturer = syscall.UTF16ToString(buf)
 			}
 
-			_, _, err = hidD_GetProductString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err != nil && err.(syscall.Errno) == 0 {
+			if _, err := call(_HidD_GetProductString, f, unsafe.Pointer(&buf[0]), len(buf)); err == nil {
 				rv.product = syscall.UTF16ToString(buf)
 			}
 
-			_, _, err = hidD_GetSerialNumberString.Call(f.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-			if err != nil && err.(syscall.Errno) == 0 {
+			if _, err := call(_HidD_GetSerialNumberString, f, unsafe.Pointer(&buf[0]), len(buf)); err == nil {
 				rv.serialNumber = syscall.UTF16ToString(buf)
 			}
 
 			var preparsed uintptr
-			b, _, err := hidD_GetPreparsedData.Call(f.Fd(), uintptr(unsafe.Pointer(&preparsed)))
-			if err != nil && err.(syscall.Errno) != 0 {
+			if b, err := call(_HidD_GetPreparsedData, f, unsafe.Pointer(&preparsed)); err != nil || b == 0 {
 				return nil
 			}
-			if b == 0 {
-				return nil
-			}
-			defer hidD_FreePreparsedData.Call(preparsed)
+			defer call(_HidD_FreePreparsedData, preparsed)
 
-			var caps hHIDP_CAPS
-			status, _, err := hidP_GetCaps.Call(preparsed, uintptr(unsafe.Pointer(&caps)))
-			if err != nil && err.(syscall.Errno) != 0 {
-				return nil
-			}
-			if status != hHIDP_STATUS_SUCCESS {
+			var caps _HIDP_CAPS
+			if status, err := call(_HidP_GetCaps, preparsed, unsafe.Pointer(&caps)); err != nil || uint32(status) != _HIDP_STATUS_SUCCESS {
 				return nil
 			}
 
@@ -224,11 +358,15 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
-	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
+	pathW, err := syscall.UTF16FromString(d.path)
+	if err != nil {
+		return nil
+	}
+
+	f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), _GENERIC_READ|_GENERIC_WRITE, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, _FILE_FLAG_OVERLAPPED, null)
 	if err != nil {
 		return err
 	}
-
 	d.extra.file = f
 
 	if lock {
@@ -250,24 +388,29 @@ func (d *Device) lock() error {
 			return err
 		}
 
-		f, err := os.Open(lockFile)
+		pathW, err := syscall.UTF16FromString(lockFile)
+		if err != nil {
+			return nil
+		}
+
+		f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), _GENERIC_READ|_GENERIC_WRITE, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, _FILE_FLAG_OVERLAPPED, null)
 		if err != nil {
 			return err
 		}
 
-		ovl := &syscall.Overlapped{}
-		_, _, err = lockFileEx.Call(f.Fd(), kLOCKFILE_EXCLUSIVE_LOCK|kLOCKFILE_FAIL_IMMEDIATELY, 0, 0xffffffff, 0xffffffff, uintptr(unsafe.Pointer(ovl)))
-		if err != nil && err.(syscall.Errno) != 0 {
-			f.Close()
+		if _, err = call(_LockFileEx, f, _LOCKFILE_EXCLUSIVE_LOCK|_LOCKFILE_FAIL_IMMEDIATELY, 0, 0xffffffff, 0xffffffff, unsafe.Pointer(&syscall.Overlapped{})); err != nil {
+			if _, err_ := call(_CloseHandle, f); err_ != nil {
+				return err_
+			}
 			return err
 		}
 		d.extra.flock = f
-
+		d.extra.flockPath = lockFile
 		return nil
 	}()
 
 	if err != nil {
-		if errno, ok := err.(syscall.Errno); ok && errno == kERROR_LOCK_VIOLATION {
+		if errno, match := err.(syscall.Errno); match && uint32(errno) == _ERROR_LOCK_VIOLATION {
 			return ErrDeviceLocked
 		}
 	}
@@ -275,36 +418,36 @@ func (d *Device) lock() error {
 }
 
 func (d *Device) isOpen() bool {
-	return d.extra.file != nil
+	return d.extra.file != null
 }
 
 func (d *Device) close() error {
-	if err := d.extra.file.Close(); err != nil {
+	if _, err := call(_CloseHandle, d.extra.file); err != nil {
 		return err
 	}
-	d.extra.file = nil
+	d.extra.file = null
 
-	if d.extra.flock != nil {
-		fn := d.extra.flock.Name()
-		if err := d.extra.flock.Close(); err != nil {
+	if d.extra.flock != null {
+		if _, err := call(_CloseHandle, d.extra.flock); err != nil {
 			return err
 		}
-		d.extra.flock = nil
-		os.Remove(fn)
+		d.extra.flock = null
+		if d.extra.flockPath != "" {
+			if err := os.Remove(d.extra.flockPath); err != nil {
+				return err
+			}
+		}
 	}
-
 	return nil
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {
+	ovl := overlapped{}
 	buf := make([]byte, d.reportInputLength+1)
-
-	n, err := d.extra.file.Read(buf)
-	if err != nil {
+	if _, err := call(_ReadFile, d.extra.file, unsafe.Pointer(&buf[0]), len(buf), 0, &ovl); err != nil {
 		return 0, nil, err
 	}
-
-	return buf[0], buf[1:n], nil
+	return buf[0], buf[1:ovl.n], nil
 }
 
 func (d *Device) setOutputReport(reportId byte, data []byte) error {
@@ -315,7 +458,8 @@ func (d *Device) setOutputReport(reportId byte, data []byte) error {
 		buf = append(buf, make([]byte, int(d.reportOutputLength)-len(buf))...)
 	}
 	buf = append([]byte{reportId}, buf...)
-	_, err := d.extra.file.Write(buf)
+
+	_, err := call(_WriteFile, d.extra.file, unsafe.Pointer(&buf[0]), len(buf), 0, &overlapped{})
 	return err
 }
 
@@ -323,21 +467,16 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	buf := make([]byte, d.reportFeatureLength+1)
 	buf[0] = reportId
 
-	n, err := ioctl(d.extra.file.Fd(), kIOCTL_HID_GET_FEATURE, nil, buf)
-	if err != nil && err.(syscall.Errno) != 0 {
+	n, err := ioctl(d.extra.file, _IOCTL_HID_GET_FEATURE, nil, buf)
+	if err != nil {
 		return nil, err
 	}
-
 	return buf[1:n], nil
 }
 
 func (d *Device) setFeatureReport(reportId byte, data []byte) error {
 	buf := append([]byte{reportId}, data...)
 
-	_, _, err := hidD_SetFeature.Call(d.extra.file.Fd(), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if err != nil && err.(syscall.Errno) != 0 {
-		return err
-	}
-
-	return nil
+	_, err := ioctl(d.extra.file, _IOCTL_HID_SET_FEATURE, buf, nil)
+	return err
 }
