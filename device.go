@@ -5,7 +5,7 @@
 // Package usbhid provides support for interacting with USB HID
 // devices connected to a computer, from userspace.
 //
-// It is written in pure Go and works on Linux and Windows.
+// It is written in pure Go and works on Linux, macOS and Windows.
 package usbhid
 
 import (
