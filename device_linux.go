@@ -163,7 +163,7 @@ func enumerate() ([]*Device, error) {
 			serialNumber = s
 		}
 
-		files, err := filepath.Glob(filepath.Join(path, "*", "*", "hidraw", "hidraw[0-9]*"))
+		files, err := filepath.Glob(filepath.Join(path, "[0-9]*", "[0-9]*", "hidraw", "hidraw[0-9]*"))
 		if err != nil {
 			return nil
 		}
