@@ -74,18 +74,18 @@ const (
 )
 
 var (
-	_CFDataGetBytes            func(data _CFDataRef, rang _CFRange, buffer []byte)
-	_CFDataGetLength           func(data _CFDataRef) _CFIndex
-	_CFNumberGetValue          func(number _CFNumberRef, theType _CFNumberType, valuePtr unsafe.Pointer) bool
-	_CFRelease                 func(cf _CFTypeRef)
-	_CFRunLoopGetCurrent       func() _CFRunLoopRef
-	_CFRunLoopRun              func()
-	_CFRunLoopStop             func(runLoop _CFRunLoopRef)
-	_CFSetGetCount             func(theSet _CFSetRef) _CFIndex
-	_CFSetGetValues            func(theSet _CFSetRef, value unsafe.Pointer)
-	_CFStringCreateWithCString func(alloc _CFAllocatorRef, cstr []byte, encoding _CFStringEncoding) _CFStringRef
-	_CFStringGetCString        func(theString _CFStringRef, buffer []byte, encoding _CFStringEncoding) bool
-	_CFStringGetLength         func(theString _CFStringRef) _CFIndex
+	_CFDataGetBytes          func(data _CFDataRef, rang _CFRange, buffer []byte)
+	_CFDataGetLength         func(data _CFDataRef) _CFIndex
+	_CFNumberGetValue        func(number _CFNumberRef, theType _CFNumberType, valuePtr unsafe.Pointer) bool
+	_CFRelease               func(cf _CFTypeRef)
+	_CFRunLoopGetCurrent     func() _CFRunLoopRef
+	_CFRunLoopRun            func()
+	_CFRunLoopStop           func(runLoop _CFRunLoopRef)
+	_CFSetGetCount           func(theSet _CFSetRef) _CFIndex
+	_CFSetGetValues          func(theSet _CFSetRef, value unsafe.Pointer)
+	_CFStringCreateWithBytes func(alloc _CFAllocatorRef, bytes []byte, numBytes _CFIndex, encoding _CFStringEncoding, isExternalRepresentation bool) _CFStringRef
+	_CFStringGetCString      func(theString _CFStringRef, buffer []byte, encoding _CFStringEncoding) bool
+	_CFStringGetLength       func(theString _CFStringRef) _CFIndex
 )
 
 var _kCFRunLoopDefaultMode uintptr
@@ -147,7 +147,7 @@ func init() {
 	purego.RegisterLibFunc(&_CFRunLoopStop, cf, "CFRunLoopStop")
 	purego.RegisterLibFunc(&_CFSetGetCount, cf, "CFSetGetCount")
 	purego.RegisterLibFunc(&_CFSetGetValues, cf, "CFSetGetValues")
-	purego.RegisterLibFunc(&_CFStringCreateWithCString, cf, "CFStringCreateWithCString")
+	purego.RegisterLibFunc(&_CFStringCreateWithBytes, cf, "CFStringCreateWithBytes")
 	purego.RegisterLibFunc(&_CFStringGetCString, cf, "CFStringGetCString")
 	purego.RegisterLibFunc(&_CFStringGetLength, cf, "CFStringGetLength")
 
@@ -195,37 +195,51 @@ func byteSliceToString(b []byte) string {
 	return string(b)
 }
 
-func cfstringToString(str _CFStringRef) string {
+func cfstringToString(str _CFStringRef) (string, error) {
 	buf := make([]byte, _CFStringGetLength(str)+1)
-	if _CFStringGetCString(str, buf[:], kCFStringEncodingUTF8) {
-		return byteSliceToString(buf[:])
+	if !_CFStringGetCString(str, buf[:], kCFStringEncodingUTF8) {
+		return "", errors.New("failed to convert string")
 	}
-	return ""
+	return byteSliceToString(buf[:]), nil
+}
+
+func getProperty(device _IOHIDDeviceRef, key string) (_CFTypeRef, error) {
+	bkey := []byte(key)
+	skey := _CFStringCreateWithBytes(kCFAllocatorDefault, bkey, _CFIndex(len(bkey)), kCFStringEncodingUTF8, false)
+	if skey == 0 {
+		return 0, fmt.Errorf("failed to allocate memory for device property lookup key: %s", key)
+	}
+	defer _CFRelease(_CFTypeRef(skey))
+
+	prop := _IOHIDDeviceGetProperty(device, skey)
+	if prop == 0 {
+		return 0, fmt.Errorf("failed to retrieve device property: %s", key)
+	}
+	return prop, nil
+}
+
+func getPropertyUint16(device _IOHIDDeviceRef, key string) (uint16, error) {
+	prop, err := getProperty(device, key)
+	if err != nil {
+		return 0, err
+	}
+
+	rv := uint16(0)
+	if !_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&rv)) {
+		return 0, fmt.Errorf("failed to convert property to uint16: %s", key)
+	}
+	return rv, nil
+}
+
+func getPropertyString(device _IOHIDDeviceRef, key string) (string, error) {
+	prop, err := getProperty(device, key)
+	if err != nil {
+		return "", err
+	}
+	return cfstringToString(_CFStringRef(prop))
 }
 
 func enumerate() ([]*Device, error) {
-	sManufacturer := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Manufacturer"), kCFStringEncodingUTF8)
-	sProduct := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Product"), kCFStringEncodingUTF8)
-	sProductID := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ProductID"), kCFStringEncodingUTF8)
-	sReportDescriptor := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("ReportDescriptor"), kCFStringEncodingUTF8)
-	sSerialNumber := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("SerialNumber"), kCFStringEncodingUTF8)
-	sTransport := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("Transport"), kCFStringEncodingUTF8)
-	sVendorID := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VendorID"), kCFStringEncodingUTF8)
-	sVersionNumber := _CFStringCreateWithCString(kCFAllocatorDefault, []byte("VersionNumber"), kCFStringEncodingUTF8)
-	if sManufacturer == 0 || sProduct == 0 || sProductID == 0 || sReportDescriptor == 0 || sSerialNumber == 0 || sTransport == 0 || sVendorID == 0 || sVersionNumber == 0 {
-		panic("failed to allocate memory for property key strings")
-	}
-	defer func() {
-		_CFRelease(_CFTypeRef(sManufacturer))
-		_CFRelease(_CFTypeRef(sProduct))
-		_CFRelease(_CFTypeRef(sProductID))
-		_CFRelease(_CFTypeRef(sReportDescriptor))
-		_CFRelease(_CFTypeRef(sSerialNumber))
-		_CFRelease(_CFTypeRef(sTransport))
-		_CFRelease(_CFTypeRef(sVendorID))
-		_CFRelease(_CFTypeRef(sVersionNumber))
-	}()
-
 	_IOHIDManagerSetDeviceMatching(mgr, 0)
 
 	device_set := _IOHIDManagerCopyDevices(mgr)
@@ -250,11 +264,7 @@ func enumerate() ([]*Device, error) {
 			continue
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, sTransport); prop != 0 {
-			if transport := cfstringToString(_CFStringRef(prop)); transport != "USB" {
-				continue
-			}
-		} else {
+		if transport, err := getPropertyString(device, "Transport"); err != nil || transport != "USB" {
 			continue
 		}
 
@@ -266,32 +276,28 @@ func enumerate() ([]*Device, error) {
 			},
 		}
 
-		if prop := _IOHIDDeviceGetProperty(device, sVendorID); prop != 0 {
-			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.vendorId))
+		// FIXME: not all errors should be ignored
+		if prop, err := getPropertyUint16(device, "VendorID"); err == nil {
+			dev.vendorId = prop
 		}
-
-		if prop := _IOHIDDeviceGetProperty(device, sProductID); prop != 0 {
-			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.productId))
+		if prop, err := getPropertyUint16(device, "ProductID"); err == nil {
+			dev.productId = prop
 		}
-
-		if prop := _IOHIDDeviceGetProperty(device, sVersionNumber); prop != 0 {
-			_CFNumberGetValue(_CFNumberRef(prop), kCFNumberSInt16Type, unsafe.Pointer(&dev.version))
+		if prop, err := getPropertyUint16(device, "VersionNumber"); err == nil {
+			dev.version = prop
 		}
-
-		if prop := _IOHIDDeviceGetProperty(device, sManufacturer); prop != 0 {
-			dev.manufacturer = cfstringToString(_CFStringRef(prop))
+		if prop, err := getPropertyString(device, "Manufacturer"); err == nil {
+			dev.manufacturer = prop
 		}
-
-		if prop := _IOHIDDeviceGetProperty(device, sProduct); prop != 0 {
-			dev.product = cfstringToString(_CFStringRef(prop))
+		if prop, err := getPropertyString(device, "Product"); err == nil {
+			dev.product = prop
 		}
-
-		if prop := _IOHIDDeviceGetProperty(device, sSerialNumber); prop != 0 {
-			dev.serialNumber = cfstringToString(_CFStringRef(prop))
+		if prop, err := getPropertyString(device, "SerialNumber"); err == nil {
+			dev.serialNumber = prop
 		}
 
 		descriptor := []byte{}
-		if prop := _IOHIDDeviceGetProperty(device, sReportDescriptor); prop != 0 {
+		if prop, err := getProperty(device, "ReportDescriptor"); err == nil {
 			l := _CFDataGetLength(_CFDataRef(prop))
 			buf := make([]byte, l)
 			_CFDataGetBytes(_CFDataRef(prop), _CFRange{0, l}, buf[:])
