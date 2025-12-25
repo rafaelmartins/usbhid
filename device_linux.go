@@ -203,13 +203,17 @@ func (d *Device) open(lock bool) error {
 		return err
 	}
 
-	d.extra.file = f
-
 	if lock {
-		if err := syscall.Flock(int(d.extra.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == syscall.EWOULDBLOCK {
-			return ErrDeviceLocked
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			f.Close()
+			if err == syscall.EWOULDBLOCK {
+				return ErrDeviceLocked
+			}
+			return err
 		}
 	}
+
+	d.extra.file = f
 	return nil
 }
 
@@ -218,11 +222,14 @@ func (d *Device) isOpen() bool {
 }
 
 func (d *Device) close() error {
+	if d.extra.file == nil {
+		return nil
+	}
+
 	if err := d.extra.file.Close(); err != nil {
 		return err
 	}
 	d.extra.file = nil
-
 	return nil
 }
 
