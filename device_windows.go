@@ -109,7 +109,7 @@ var (
 	_CloseHandle         = kernel32.NewProc("CloseHandle")
 	_DeviceIoControl     = kernel32.NewProc("DeviceIoControl")
 	_GetOverlappedResult = kernel32.NewProc("GetOverlappedResult")
-	_LockFile            = kernel32.NewProc("LockFile")
+	_LockFileEx          = kernel32.NewProc("LockFileEx")
 	_ReadFile            = kernel32.NewProc("ReadFile")
 	_WriteFile           = kernel32.NewProc("WriteFile")
 )
@@ -231,11 +231,11 @@ func ioctl(fd uintptr, req uint32, in []byte, out []byte) (int, error) {
 		outl uint32
 		rv   uint32
 	)
-	if in != nil {
+	if len(in) > 0 {
 		inb = unsafe.Pointer(&in[0])
 		inl = uint32(len(in))
 	}
-	if out != nil {
+	if len(out) > 0 {
 		outb = unsafe.Pointer(&out[0])
 		outl = uint32(len(out))
 	}
@@ -354,7 +354,7 @@ func enumerate() ([]*Device, error) {
 func (d *Device) open(lock bool) error {
 	pathW, err := syscall.UTF16FromString(d.path)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), _GENERIC_READ|_GENERIC_WRITE, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, _FILE_FLAG_OVERLAPPED, null)
@@ -364,7 +364,11 @@ func (d *Device) open(lock bool) error {
 	d.extra.file = f
 
 	if lock {
-		return d.lock()
+		if err := d.lock(); err != nil {
+			call(_CloseHandle, d.extra.file)
+			d.extra.file = null
+			return err
+		}
 	}
 	return nil
 }
@@ -384,18 +388,20 @@ func (d *Device) lock() error {
 
 		pathW, err := syscall.UTF16FromString(lockFile)
 		if err != nil {
-			return nil
+			os.Remove(lockFile)
+			return err
 		}
 
 		f, err := call(_CreateFileW, unsafe.Pointer(&pathW[0]), _GENERIC_READ|_GENERIC_WRITE, _FILE_SHARE_READ|_FILE_SHARE_WRITE, null, _OPEN_EXISTING, _FILE_FLAG_OVERLAPPED, null)
 		if err != nil {
+			os.Remove(lockFile)
 			return err
 		}
 
-		if _, err = call(_LockFile, f, _LOCKFILE_EXCLUSIVE_LOCK|_LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0); err != nil {
-			if _, err_ := call(_CloseHandle, f); err_ != nil {
-				return err_
-			}
+		ovl := overlapped{}
+		if _, err = call(_LockFileEx, f, _LOCKFILE_EXCLUSIVE_LOCK|_LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ovl); err != nil {
+			call(_CloseHandle, f)
+			os.Remove(lockFile)
 			return err
 		}
 		d.extra.flock = f
