@@ -329,6 +329,10 @@ type inputCtx struct {
 }
 
 func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
+	if context == nil {
+		return
+	}
+
 	d := (*Device)(context)
 
 	d.extra.mtx.Lock()
@@ -354,6 +358,10 @@ func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, rep
 }
 
 func removalCallback(context unsafe.Pointer, result _IOReturn, sender uintptr) {
+	if context == nil {
+		return
+	}
+
 	d := (*Device)(context)
 
 	d.extra.mtx.Lock()
@@ -485,6 +493,10 @@ type resultCtx struct {
 }
 
 func resultCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
+	if context == nil {
+		return
+	}
+
 	ctx := (*resultCtx)(context)
 
 	if result != kIOReturnSuccess {
