@@ -9,7 +9,7 @@ It is compatible with Linux, macOS, and Windows.
 
 ## Known issues
 
-Blocking API. To interact with it asynchronously, use goroutines, channels, or synchronization primitives.
+Blocking API. To interact with it asynchronously, use goroutines, channels, or synchronization primitives. Ongoing I/O operations are not cancelled on close.
 
 Due to Windows not allowing user-space applications to access the full HID report descriptors, this library can't validate report data sizes on a per-report basis. Instead, it can only confirm the largest possible report size for each report category. Library consumers should know the report descriptors and ensure that their data adheres to them, or implement their own validation checks. The same is true for most mainstream USB HID libraries.
 
