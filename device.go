@@ -9,8 +9,10 @@
 package usbhid
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Errors returned from usbhid package may be tested against these errors
@@ -23,12 +25,18 @@ var (
 	ErrDeviceIsOpen            = errors.New("usb hid device is open")
 	ErrDeviceLocked            = errors.New("usb hid device is locked by another application")
 	ErrGetFeatureReportFailed  = errors.New("get usb hid feature report failed")
+	ErrGetInputBufferTooSmall  = errors.New("usb hid buffer too small to get input report")
 	ErrGetInputReportFailed    = errors.New("get usb hid input report failed")
 	ErrMoreThanOneDeviceFound  = errors.New("more than one usb hid device found")
 	ErrNoDeviceFound           = errors.New("no usb hid device found")
 	ErrReportBufferOverflow    = errors.New("usb hid report buffer overflow")
 	ErrSetFeatureReportFailed  = errors.New("set usb hid feature report failed")
 	ErrSetOutputReportFailed   = errors.New("set usb hid output report failed")
+)
+
+const (
+	defaultTimeout = 250 * time.Millisecond
+	minimumTimeout = time.Millisecond
 )
 
 // Device is an opaque structure that represents a USB HID device connected
@@ -168,6 +176,30 @@ func (d *Device) GetInputReport() (byte, []byte, error) {
 	return id, buf, nil
 }
 
+// GetInputReportWithContext performs a cancelable read of an input report from the USB HID device. The method will
+// block until either a report is available, an error occurs, or ctx is done. When a report becomes available, the
+// method returns the report ID, a slice of bytes with the report content, and a nil error. The given buffer is used as
+// scratch space and to avoid allocations on some platforms; buf must have a capacity of
+// d.GetInputReportBufferCapacity() or larger, or else the method returns ErrGetInputBufferTooSmall. If ctx is done
+// before a report becomes available, then the returned error will wrap ctx.Err(). For more responsive timeouts, pass a
+// ctx that returns a deadline from ctx.Deadline().
+func (d *Device) GetInputReportWithContext(ctx context.Context, buf []byte) (byte, []byte, error) {
+	if !d.isOpen() {
+		return 0, nil, fmt.Errorf("%w [%s]", ErrDeviceIsClosed, d)
+	}
+
+	buflen := d.GetInputReportBufferCapacity()
+	if cap(buf) < buflen {
+		return 0, nil, ErrGetInputBufferTooSmall
+	}
+
+	id, buf, err := d.getInputReportWithContext(ctx, buf[:buflen])
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w [%s]: %w", ErrGetInputReportFailed, d, err)
+	}
+	return id, buf, nil
+}
+
 // SetOutputReport writes an output report to the USB HID device.
 // It takes the report id and a slice of bytes with the data to be sent,
 // and returns an error or nil. If the size of the slice is lower than
@@ -229,6 +261,11 @@ func (d *Device) GetInputReportLength() uint16 {
 	return d.reportInputLength
 }
 
+// GetInputReportBufferCapacity returns the buffer capacity required to get an input report.
+func (d *Device) GetInputReportBufferCapacity() int {
+	return int(d.reportInputLength) + 1
+}
+
 // GetOutputReportLength returns the data size of an output report in bytes.
 func (d *Device) GetOutputReportLength() uint16 {
 	return d.reportOutputLength
@@ -286,4 +323,29 @@ func (d *Device) UsagePage() uint16 {
 // Usage returns the usage identifier of the USB HID device.
 func (d *Device) Usage() uint16 {
 	return d.usage
+}
+
+// deviceTimeoutForContext determines how long to wait on a blocking call in a backend implementation in order to
+// balance computational overhead with cancellation responsiveness.
+func deviceTimeoutForContext(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return defaultTimeout
+	}
+
+	timeout := time.Until(deadline)
+
+	// If the deadline has passed, then the implementation may have just missed it with a ctx.Done() call, so we return
+	// a tiny positive timeout in order to check again quickly without confusing any system calls.
+	if timeout < minimumTimeout {
+		return minimumTimeout
+	}
+
+	// If we have a known deadline that is far in the future, we should still only wait for a short time to stay
+	// responsive, because ctx could be canceled prior to the deadline.
+	if timeout > defaultTimeout {
+		return defaultTimeout
+	}
+
+	return timeout
 }

@@ -6,6 +6,7 @@ package usbhid
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -468,7 +469,14 @@ func (d *Device) close() error {
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {
+	return d.getInputReportWithContext(context.Background(), nil)
+}
+
+func (d *Device) getInputReportWithContext(ctx context.Context, _ []byte) (byte, []byte, error) {
 	select {
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+
 	case result := <-d.extra.inputCh:
 		if result.err != nil {
 			return 0, nil, result.err

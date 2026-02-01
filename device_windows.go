@@ -5,6 +5,7 @@
 package usbhid
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
@@ -96,6 +97,10 @@ const (
 	_IOCTL_HID_SET_FEATURE uint32 = 0x000b0191
 	_IOCTL_HID_GET_FEATURE uint32 = 0x000b0192
 
+	_WAIT_OBJECT_0 uint32 = 0x00000000
+	_WAIT_TIMEOUT  uint32 = 0x00000102
+	_WAIT_FAILED   uint32 = 0xffffffff
+
 	_ERROR_SUCCESS             syscall.Errno = 0x00000000
 	_ERROR_LOCK_VIOLATION      syscall.Errno = 0x00000021
 	_ERROR_INSUFFICIENT_BUFFER syscall.Errno = 0x0000007a
@@ -104,6 +109,7 @@ const (
 
 var (
 	kernel32             = syscall.NewLazyDLL("kernel32.dll")
+	_CancelIoEx          = kernel32.NewProc("CancelIoEx")
 	_CreateEventW        = kernel32.NewProc("CreateEventW")
 	_CreateFileW         = kernel32.NewProc("CreateFileW")
 	_CloseHandle         = kernel32.NewProc("CloseHandle")
@@ -111,6 +117,7 @@ var (
 	_GetOverlappedResult = kernel32.NewProc("GetOverlappedResult")
 	_LockFile            = kernel32.NewProc("LockFile")
 	_ReadFile            = kernel32.NewProc("ReadFile")
+	_WaitForSingleObject = kernel32.NewProc("WaitForSingleObject")
 	_WriteFile           = kernel32.NewProc("WriteFile")
 )
 
@@ -144,6 +151,10 @@ var (
 )
 
 func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
+	return callWithContext(context.Background(), p, args...)
+}
+
+func callWithContext(ctx context.Context, p *syscall.LazyProc, args ...any) (uintptr, error) {
 	var ovl *overlapped
 
 	v := make([]uintptr, len(args))
@@ -209,7 +220,38 @@ func call(p *syscall.LazyProc, args ...any) (uintptr, error) {
 
 	if ovl != nil {
 		// the functions that accept OVERLAPPED always have a file handle as first argument
-		if _, _, err = _GetOverlappedResult.Call(v[0], uintptr(unsafe.Pointer(&ovl.ovl)), uintptr(unsafe.Pointer(&ovl.n)), 1); err != nil {
+		fh := v[0]
+
+		// Wait until the result is available
+		for {
+			select {
+			case <-ctx.Done():
+				// Best effort to cancel the outstanding call, but ignore any error since our time has expired
+				_, _, _ = _CancelIoEx.Call(fh, uintptr(unsafe.Pointer(&ovl.ovl)))
+				return 0, ctx.Err()
+			default:
+			}
+
+			r, _, err := _WaitForSingleObject.Call(ovl.ovl.hEvent, uintptr(deviceTimeoutForContext(ctx).Milliseconds()))
+			if r == uintptr(_WAIT_OBJECT_0) {
+				// The results are available
+				break
+			}
+			if r == uintptr(_WAIT_TIMEOUT) {
+				// Nothing happened, but it's time to check ctx again
+				continue
+			}
+			// The only other expected state is a failure with err set to something other than _ERROR_SUCCESS
+			if r != uintptr(_WAIT_FAILED) {
+				return 0, fmt.Errorf("unexpected wait result: 0x%08X", r)
+			}
+			if err == nil {
+				return 0, errors.New("unexpected wait failure with nil error")
+			}
+			return 0, fmt.Errorf("waiting for read failed: %w", err)
+		}
+
+		if _, _, err = _GetOverlappedResult.Call(fh, uintptr(unsafe.Pointer(&ovl.ovl)), uintptr(unsafe.Pointer(&ovl.n)), 1); err != nil {
 			errno, match := err.(syscall.Errno)
 			if !match {
 				return 0, err
@@ -439,6 +481,14 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 	ovl := overlapped{}
 	buf := make([]byte, d.reportInputLength+1)
 	if _, err := call(_ReadFile, d.extra.file, unsafe.Pointer(&buf[0]), len(buf), 0, &ovl); err != nil {
+		return 0, nil, err
+	}
+	return buf[0], buf[1:ovl.n], nil
+}
+
+func (d *Device) getInputReportWithContext(ctx context.Context, buf []byte) (byte, []byte, error) {
+	ovl := overlapped{}
+	if _, err := callWithContext(ctx, _ReadFile, d.extra.file, unsafe.Pointer(&buf[0]), len(buf), 0, &ovl); err != nil {
 		return 0, nil, err
 	}
 	return buf[0], buf[1:ovl.n], nil

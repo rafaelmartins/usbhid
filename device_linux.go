@@ -5,6 +5,8 @@
 package usbhid
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -17,7 +19,8 @@ import (
 )
 
 type deviceExtra struct {
-	file *os.File
+	file    *os.File
+	epollFD int
 }
 
 var (
@@ -198,10 +201,17 @@ func enumerate() ([]*Device, error) {
 }
 
 func (d *Device) open(lock bool) error {
+	success := false
+
 	f, err := os.OpenFile(d.path, os.O_RDWR, 0755)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if !success {
+			_ = f.Close()
+		}
+	}()
 
 	d.extra.file = f
 
@@ -210,6 +220,25 @@ func (d *Device) open(lock bool) error {
 			return ErrDeviceLocked
 		}
 	}
+
+	d.extra.epollFD, err = syscall.EpollCreate1(syscall.O_CLOEXEC)
+	if err != nil {
+		return fmt.Errorf("failed to create epoll: %w", err)
+	}
+	defer func() {
+		if !success {
+			_ = syscall.Close(d.extra.epollFD)
+		}
+	}()
+
+	if err := syscall.EpollCtl(d.extra.epollFD, syscall.EPOLL_CTL_ADD, int(d.extra.file.Fd()), &syscall.EpollEvent{
+		Events: syscall.EPOLLIN | syscall.EPOLLERR,
+		// Fd is unnecessary since we monitor only one file descriptor
+	}); err != nil {
+		return fmt.Errorf("failed to add hidraw file to epoll interest list: %w", err)
+	}
+
+	success = true
 	return nil
 }
 
@@ -223,18 +252,33 @@ func (d *Device) close() error {
 	}
 	d.extra.file = nil
 
+	if err := syscall.Close(d.extra.epollFD); err != nil {
+		return err
+	}
+	d.extra.epollFD = -1
+
 	return nil
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {
+	return d.getInputReportWithBuffer(make([]byte, d.GetInputReportBufferCapacity()))
+}
+
+func (d *Device) getInputReportWithContext(ctx context.Context, buf []byte) (byte, []byte, error) {
+	if err := d.waitForRead(ctx); err != nil {
+		return 0, nil, err
+	}
+
+	return d.getInputReportWithBuffer(buf)
+}
+
+func (d *Device) getInputReportWithBuffer(buf []byte) (byte, []byte, error) {
 	buflen := d.reportInputLength
 	if d.reportWithId {
 		buflen++
 	}
 
-	buf := make([]byte, buflen)
-
-	n, err := d.extra.file.Read(buf)
+	n, err := d.extra.file.Read(buf[:buflen])
 	if err != nil {
 		return 0, nil, err
 	}
@@ -243,6 +287,30 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 		return buf[0], buf[1:n], nil
 	}
 	return 0, buf[:n], nil
+}
+
+func (d *Device) waitForRead(ctx context.Context) error {
+	var waitEvents [1]syscall.EpollEvent
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		events, err := syscall.EpollWait(d.extra.epollFD, waitEvents[:], int(deviceTimeoutForContext(ctx).Milliseconds()))
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return fmt.Errorf("epoll failure: %w", err)
+		}
+		if events < 1 {
+			continue
+		}
+		break // Even if an error is ready instead of a read, we'll still want to call Read to expose the error
+	}
+
+	return nil
 }
 
 func (d *Device) setOutputReport(reportId byte, data []byte) error {
