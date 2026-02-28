@@ -110,7 +110,7 @@ fmt.Printf("Report ID: %d, Data: %x\n", reportId, data)
 
 ### Writing output reports
 
-[`SetOutputReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.SetOutputReport) sends an output report. Provide the report ID and the data to send. If the data is shorter than the expected report size, it is zero-padded. If it is longer, `ErrReportBufferOverflow` is returned.
+[`SetOutputReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.SetOutputReport) sends an output report. Provide the report ID and the data to send. If the data is longer than the expected report size, `ErrReportBufferOverflow` is returned.
 
 ```go
 err := device.SetOutputReport(0x01, []byte{0x00, 0x01, 0x02})
@@ -121,7 +121,7 @@ if err != nil {
 
 ### Feature reports
 
-[`GetFeatureReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.GetFeatureReport) reads a feature report by ID. [`SetFeatureReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.SetFeatureReport) writes a feature report. The same zero-padding and overflow rules apply to `SetFeatureReport` as to `SetOutputReport`.
+[`GetFeatureReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.GetFeatureReport) reads a feature report by ID. [`SetFeatureReport`](https://pkg.go.dev/rafaelmartins.com/p/usbhid#Device.SetFeatureReport) writes a feature report. The same overflow rules apply to `SetFeatureReport` as to `SetOutputReport`.
 
 ```go
 data, err := device.GetFeatureReport(0x01)

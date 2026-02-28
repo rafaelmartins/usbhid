@@ -9,7 +9,7 @@ usbhid is a Go library that provides userspace access to USB HID (Human Interfac
 
 The library is written in pure Go with no cgo dependency. On Linux, it accesses devices through the hidraw subsystem via sysfs and ioctl. On macOS, it calls IOKit and CoreFoundation through [purego](https://github.com/ebitengine/purego). On Windows, it uses the SetupAPI and HID APIs via syscall.
 
-## Key Highlights
+## Key highlights
 
 - **Pure Go** -- no cgo required on any platform
 - **Cross-platform** -- supports Linux, macOS, and Windows with platform-native backends
@@ -53,7 +53,7 @@ defer device.Close()
 
 - Go 1.19 or later
 
-## Explore Further
+## Explore further
 
 - [Development guide](10_development-guide.md) -- integration, API overview, and platform details
 - [API documentation](https://pkg.go.dev/rafaelmartins.com/p/usbhid) -- complete API reference on pkg.go.dev
