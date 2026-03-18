@@ -575,6 +575,9 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	}
 
 	if d.reportWithId {
+		if ctx.len <= 1 {
+			return nil, nil
+		}
 		return buf[1:ctx.len], nil
 	}
 	return buf[:ctx.len], nil

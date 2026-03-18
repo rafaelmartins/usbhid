@@ -240,6 +240,9 @@ func (d *Device) getInputReport() (byte, []byte, error) {
 	}
 
 	if d.reportWithId {
+		if n <= 1 {
+			return 0, nil, nil
+		}
 		return buf[0], buf[1:n], nil
 	}
 	return 0, buf[:n], nil
@@ -266,6 +269,9 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	if d.reportWithId {
 		start++
 		rv--
+	}
+	if rv <= 0 {
+		return nil, nil
 	}
 	return buf[start : start+rv], nil
 }

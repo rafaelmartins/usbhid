@@ -465,6 +465,9 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if n <= 1 {
+		return nil, nil
+	}
 	return buf[1:n], nil
 }
 
