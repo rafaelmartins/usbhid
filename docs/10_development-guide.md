@@ -182,7 +182,7 @@ Exclusive locking uses `kIOHIDOptionsTypeSeizeDevice`.
 
 The Windows backend uses SetupAPI for device enumeration and `hid.dll` for HID-specific operations. Device attributes and capabilities are obtained through `HidD_GetAttributes` and `HidP_GetCaps`. I/O uses overlapped operations through the kernel32 API.
 
-Exclusive locking is implemented through a lock file in the system's temporary directory (derived from a SHA-1 hash of the device path) using `LockFile`.
+Exclusive locking is implemented through a lock file in the system's temporary directory (derived from a SHA-1 hash of the device path) using `LockFileEx`.
 
 > [!WARNING]
 > Windows does not allow user-space applications to access full HID report descriptors. As a result, the library cannot validate report data sizes on a per-report basis -- it can only verify the largest possible size for each report category (input, output, feature). Library consumers should know the report descriptors for their target devices and ensure data adheres to them, or implement their own validation.
