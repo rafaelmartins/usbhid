@@ -91,6 +91,9 @@ const (
 	kCFNumberSInt16Type _CFIndex = 2
 
 	kCFStringEncodingUTF8 _CFStringEncoding = 0x08000100
+
+	kCFRunLoopRunFinished int32 = 1
+	kCFRunLoopRunStopped  int32 = 2
 )
 
 var (
@@ -99,7 +102,7 @@ var (
 	_CFNumberGetValue        func(number _CFNumberRef, theType _CFNumberType, valuePtr unsafe.Pointer) bool
 	_CFRelease               func(cf _CFTypeRef)
 	_CFRunLoopGetCurrent     func() _CFRunLoopRef
-	_CFRunLoopRun            func()
+	_CFRunLoopRunInMode      func(mode _CFStringRef, seconds _CFTimeInterval, returnAfterSourceHandled bool) int32
 	_CFRunLoopStop           func(runLoop _CFRunLoopRef)
 	_CFRunLoopSourceCreate   func(allocator _CFAllocatorRef, order _CFIndex, context *_CFRunLoopSourceContext) _CFRunLoopSourceRef
 	_CFRunLoopAddSource      func(runLoop _CFRunLoopRef, source _CFRunLoopSourceRef, mode _CFStringRef)
@@ -111,6 +114,9 @@ var (
 	_CFStringCreateWithBytes func(alloc _CFAllocatorRef, bytes []byte, numBytes _CFIndex, encoding _CFStringEncoding, isExternalRepresentation bool) _CFStringRef
 	_CFStringGetCString      func(theString _CFStringRef, buffer []byte, encoding _CFStringEncoding) bool
 	_CFStringGetLength       func(theString _CFStringRef) _CFIndex
+
+	_objc_autoreleasePoolPush func() uintptr
+	_objc_autoreleasePoolPop  func(pool uintptr)
 )
 
 var _kCFRunLoopDefaultMode uintptr
@@ -169,7 +175,7 @@ func init() {
 	purego.RegisterLibFunc(&_CFNumberGetValue, cf, "CFNumberGetValue")
 	purego.RegisterLibFunc(&_CFRelease, cf, "CFRelease")
 	purego.RegisterLibFunc(&_CFRunLoopGetCurrent, cf, "CFRunLoopGetCurrent")
-	purego.RegisterLibFunc(&_CFRunLoopRun, cf, "CFRunLoopRun")
+	purego.RegisterLibFunc(&_CFRunLoopRunInMode, cf, "CFRunLoopRunInMode")
 	purego.RegisterLibFunc(&_CFRunLoopStop, cf, "CFRunLoopStop")
 	purego.RegisterLibFunc(&_CFRunLoopSourceCreate, cf, "CFRunLoopSourceCreate")
 	purego.RegisterLibFunc(&_CFRunLoopAddSource, cf, "CFRunLoopAddSource")
@@ -186,6 +192,14 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+
+	objc, err := purego.Dlopen("/usr/lib/libobjc.A.dylib", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
+	if err != nil {
+		panic(err)
+	}
+
+	purego.RegisterLibFunc(&_objc_autoreleasePoolPush, objc, "objc_autoreleasePoolPush")
+	purego.RegisterLibFunc(&_objc_autoreleasePoolPop, objc, "objc_autoreleasePoolPop")
 
 	iokit, err := purego.Dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
 	if err != nil {
@@ -271,6 +285,16 @@ func getPropertyString(device _IOHIDDeviceRef, key string) (string, error) {
 }
 
 func enumerate() ([]*Device, error) {
+	// IOHIDManagerCopyDevices instantiates HID device wrapper objects that
+	// are autoreleased on the calling thread. Pin the goroutine to its OS
+	// thread (pools are thread-local) and drain the pool when done, so
+	// repeated enumeration doesn't accumulate them indefinitely.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	pool := _objc_autoreleasePoolPush()
+	defer _objc_autoreleasePoolPop(pool)
+
 	_IOHIDManagerSetDeviceMatching(mgr, 0)
 
 	rv := []*Device{}
@@ -471,7 +495,20 @@ func (d *Device) open(lock bool) error {
 
 		wait <- struct{}{}
 
-		_CFRunLoopRun()
+		// Run the loop in bounded slices, draining the Objective-C
+		// autorelease pool between them. IOHIDLib autoreleases objects on
+		// every report callback, and this Go-created thread never pops a
+		// pool on its own (that is normally done by AppKit machinery), so
+		// with a bare CFRunLoopRun those objects would accumulate for the
+		// life of the thread and grow the process footprint without bound.
+		for {
+			pool := _objc_autoreleasePoolPush()
+			rv := _CFRunLoopRunInMode(**(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)), 60, false)
+			_objc_autoreleasePoolPop(pool)
+			if rv == kCFRunLoopRunFinished || rv == kCFRunLoopRunStopped {
+				break
+			}
+		}
 
 		d.extra.mtx.Lock()
 		d.extra.inputClosed = true
