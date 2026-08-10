@@ -24,6 +24,13 @@ func TestDarwinSystemAllocator(t *testing.T) {
 	_CFAllocatorDeallocate(allocator, ptr)
 }
 
+func TestDarwinIOReturnError(t *testing.T) {
+	err := ioReturnError(-0x1ffffd44)
+	if got, want := err.Error(), "(iokit/common) general error (0xe00002bc)"; got != want {
+		t.Fatalf("unexpected IOReturn error: got %q, want %q", got, want)
+	}
+}
+
 func TestDarwinInputCallbackCopiesNativeReport(t *testing.T) {
 	d := &Device{}
 	d.extra.state = deviceOpen

@@ -114,6 +114,8 @@ const (
 )
 
 var (
+	_mach_error_string func(errorValue _kern_return_t) string
+
 	_CFAllocatorAllocate     func(allocator _CFAllocatorRef, size _CFIndex, hint uintptr) unsafe.Pointer
 	_CFAllocatorDeallocate   func(allocator _CFAllocatorRef, ptr unsafe.Pointer)
 	_CFDataGetBytes          func(data _CFDataRef, rang _CFRange, buffer []byte)
@@ -196,6 +198,8 @@ var callbackDevices = struct {
 }
 
 func init() {
+	purego.RegisterLibFunc(&_mach_error_string, purego.RTLD_DEFAULT, "mach_error_string")
+
 	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
 	if err != nil {
 		panic(err)
@@ -266,8 +270,14 @@ func init() {
 
 	mgr = _IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone)
 	if rv := _IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone); rv != kIOReturnSuccess {
-		panic("failed to create iohid manager")
+		panic(fmt.Errorf("failed to create iohid manager: %w", ioReturnError(rv)))
 	}
+}
+
+type ioReturnError _IOReturn
+
+func (e ioReturnError) Error() string {
+	return fmt.Sprintf("%s (0x%08x)", _mach_error_string(_IOReturn(e)), uint32(e))
 }
 
 func byteSliceToString(b []byte) string {
@@ -433,7 +443,7 @@ func inputCallback(context uintptr, result _IOReturn, sender uintptr, reportType
 
 	ctx := inputCtx{}
 	if result != kIOReturnSuccess {
-		ctx.err = fmt.Errorf("0x%08x", result)
+		ctx.err = ioReturnError(result)
 	} else if report == nil {
 		ctx.err = errors.New("report buffer is nil")
 	} else if reportLength < 0 || reportLength > d.extra.inputBufferLen {
@@ -579,7 +589,7 @@ func (d *Device) open(lock bool) (err error) {
 		if rv == kIOReturnExclusiveAccess {
 			return ErrDeviceLocked
 		}
-		return fmt.Errorf("0x%08x", rv)
+		return ioReturnError(rv)
 	}
 
 	inputBufferLen := _CFIndex(d.reportInputLength + 1)
@@ -778,7 +788,7 @@ func (d *Device) close() error {
 	pool := _objc_autoreleasePoolPush()
 	if !disconnected {
 		if rv := _IOHIDDeviceClose(file, options); rv != kIOReturnSuccess {
-			closeErr = fmt.Errorf("0x%08x", rv)
+			closeErr = ioReturnError(rv)
 		}
 	}
 	_CFRelease(_CFTypeRef(file))
@@ -859,7 +869,7 @@ func (d *Device) setReport(typ _IOHIDReportType, reportId byte, data []byte) err
 	pool := _objc_autoreleasePoolPush()
 	defer _objc_autoreleasePoolPop(pool)
 	if rv := _IOHIDDeviceSetReport(file, typ, _CFIndex(reportId), buf, _CFIndex(len(buf))); rv != kIOReturnSuccess {
-		return fmt.Errorf("0x%08x", rv)
+		return ioReturnError(rv)
 	}
 	return nil
 }
@@ -896,7 +906,7 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	_objc_autoreleasePoolPop(pool)
 	runtime.UnlockOSThread()
 	if rv != kIOReturnSuccess {
-		return nil, fmt.Errorf("0x%08x", rv)
+		return nil, ioReturnError(rv)
 	}
 	if l < 0 || l > _CFIndex(len(buf)) {
 		return nil, fmt.Errorf("invalid report length: %d", l)
