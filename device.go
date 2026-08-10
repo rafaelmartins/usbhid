@@ -128,6 +128,9 @@ func (d *Device) Open(lock bool) error {
 	}
 
 	if err := d.open(lock); err != nil {
+		if err == ErrDeviceIsOpen {
+			return fmt.Errorf("%w [%s]", ErrDeviceIsOpen, d)
+		}
 		if err == ErrDeviceLocked {
 			return fmt.Errorf("%w [%s]", ErrDeviceLocked, d)
 		}

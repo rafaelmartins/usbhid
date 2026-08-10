@@ -47,7 +47,7 @@ type (
 
 type _CFRunLoopSourceContext struct {
 	version         _CFIndex
-	info            unsafe.Pointer
+	info            uintptr
 	retain          uintptr
 	release         uintptr
 	copyDescription uintptr
@@ -67,23 +67,40 @@ type (
 )
 
 type deviceExtra struct {
+	// serializes complete open/close transitions.
+	lifeMtx sync.Mutex
+	// protects the fields observed by callbacks and public operations.
+	stateMtx sync.Mutex
+	// i/o calls hold while entering iokit.
+	ioMtx sync.Mutex
+
+	state   deviceState
 	file    _IOHIDDeviceRef
 	options _IOOptionBits
-	runloop _CFRunLoopRef
 
-	mtx            sync.Mutex
-	disconnect     bool
-	disconnectCh   chan bool
-	disconnectOnce sync.Once
-	inputBuffer    []byte
+	runloop     _CFRunLoopRef
+	runloopDone chan struct{}
+	ioSource    _CFRunLoopSourceRef
+
+	done chan struct{}
+
+	inputBuffer    unsafe.Pointer
+	inputBufferLen _CFIndex
 	inputCh        chan inputCtx
 	inputClosed    bool
-	runloopDone    chan struct{}
-
-	ioMtx    sync.Mutex
-	ioSource _CFRunLoopSourceRef
-	ioCh     chan func()
+	callbackHandle uintptr
 }
+
+type deviceState uint8
+
+const (
+	deviceClosed deviceState = iota
+	deviceOpening
+	deviceOpen
+	deviceClosing
+	deviceDisconnected
+	deviceRunloopFailed
+)
 
 const (
 	kCFAllocatorDefault _CFAllocatorRef = 0
@@ -97,6 +114,8 @@ const (
 )
 
 var (
+	_CFAllocatorAllocate     func(allocator _CFAllocatorRef, size _CFIndex, hint uintptr) unsafe.Pointer
+	_CFAllocatorDeallocate   func(allocator _CFAllocatorRef, ptr unsafe.Pointer)
 	_CFDataGetBytes          func(data _CFDataRef, rang _CFRange, buffer []byte)
 	_CFDataGetLength         func(data _CFDataRef) _CFIndex
 	_CFNumberGetValue        func(number _CFNumberRef, theType _CFNumberType, valuePtr unsafe.Pointer) bool
@@ -119,7 +138,10 @@ var (
 	_objc_autoreleasePoolPop  func(pool uintptr)
 )
 
-var _kCFRunLoopDefaultMode uintptr
+var (
+	_kCFAllocatorSystemDefault uintptr
+	_kCFRunLoopDefaultMode     uintptr
+)
 
 const (
 	kIOHIDOptionsTypeNone        _IOOptionBits = 0
@@ -136,13 +158,13 @@ var (
 	_IOHIDDeviceClose                       func(device _IOHIDDeviceRef, options _IOOptionBits) _IOReturn
 	_IOHIDDeviceCreate                      func(allocator _CFAllocatorRef, service _io_service_t) _IOHIDDeviceRef
 	_IOHIDDeviceGetProperty                 func(device _IOHIDDeviceRef, key _CFStringRef) _CFTypeRef
-	_IOHIDDeviceGetReportWithCallback       func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportId _CFIndex, report []byte, pReportLength *_CFIndex, timeout _CFTimeInterval, callback uintptr, context unsafe.Pointer) _IOReturn
+	_IOHIDDeviceGetReport                   func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportId _CFIndex, report []byte, pReportLength *_CFIndex) _IOReturn
 	_IOHIDDeviceGetService                  func(device _IOHIDDeviceRef) _io_service_t
 	_IOHIDDeviceOpen                        func(device _IOHIDDeviceRef, options _IOOptionBits) _IOReturn
-	_IOHIDDeviceRegisterInputReportCallback func(device _IOHIDDeviceRef, report unsafe.Pointer, reportLength _CFIndex, callback uintptr, context unsafe.Pointer)
-	_IOHIDDeviceRegisterRemovalCallback     func(device _IOHIDDeviceRef, callback uintptr, context unsafe.Pointer)
+	_IOHIDDeviceRegisterInputReportCallback func(device _IOHIDDeviceRef, report unsafe.Pointer, reportLength _CFIndex, callback uintptr, context uintptr)
+	_IOHIDDeviceRegisterRemovalCallback     func(device _IOHIDDeviceRef, callback uintptr, context uintptr)
 	_IOHIDDeviceScheduleWithRunLoop         func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
-	_IOHIDDeviceSetReportWithCallback       func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportID _CFIndex, report []byte, reportLength _CFIndex, timeout _CFTimeInterval, callback uintptr, context unsafe.Pointer) _IOReturn
+	_IOHIDDeviceSetReport                   func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportID _CFIndex, report []byte, reportLength _CFIndex) _IOReturn
 	_IOHIDDeviceUnscheduleFromRunLoop       func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
 	_IOHIDManagerClose                      func(manager _IOHIDManagerRef, options _IOOptionBits) _IOReturn
 	_IOHIDManagerCopyDevices                func(manager _IOHIDManagerRef) _CFSetRef
@@ -156,13 +178,22 @@ var (
 )
 
 var (
-	mgr _IOHIDManagerRef
+	mgrMtx sync.Mutex
+	mgr    _IOHIDManagerRef
 
 	inputCallbackPtr         = purego.NewCallback(inputCallback)
 	removalCallbackPtr       = purego.NewCallback(removalCallback)
-	resultCallbackPtr        = purego.NewCallback(resultCallback)
 	sourcePerformCallbackPtr = purego.NewCallback(sourcePerformCallback)
 )
+
+var callbackDevices = struct {
+	sync.RWMutex
+	next    uintptr
+	devices map[uintptr]*Device
+}{
+	next:    1,
+	devices: map[uintptr]*Device{},
+}
 
 func init() {
 	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
@@ -170,6 +201,8 @@ func init() {
 		panic(err)
 	}
 
+	purego.RegisterLibFunc(&_CFAllocatorAllocate, cf, "CFAllocatorAllocate")
+	purego.RegisterLibFunc(&_CFAllocatorDeallocate, cf, "CFAllocatorDeallocate")
 	purego.RegisterLibFunc(&_CFDataGetBytes, cf, "CFDataGetBytes")
 	purego.RegisterLibFunc(&_CFDataGetLength, cf, "CFDataGetLength")
 	purego.RegisterLibFunc(&_CFNumberGetValue, cf, "CFNumberGetValue")
@@ -192,6 +225,10 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	_kCFAllocatorSystemDefault, err = purego.Dlsym(cf, "kCFAllocatorSystemDefault")
+	if err != nil {
+		panic(err)
+	}
 
 	objc, err := purego.Dlopen("/usr/lib/libobjc.A.dylib", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
 	if err != nil {
@@ -209,13 +246,13 @@ func init() {
 	purego.RegisterLibFunc(&_IOHIDDeviceClose, iokit, "IOHIDDeviceClose")
 	purego.RegisterLibFunc(&_IOHIDDeviceCreate, iokit, "IOHIDDeviceCreate")
 	purego.RegisterLibFunc(&_IOHIDDeviceGetProperty, iokit, "IOHIDDeviceGetProperty")
-	purego.RegisterLibFunc(&_IOHIDDeviceGetReportWithCallback, iokit, "IOHIDDeviceGetReportWithCallback")
+	purego.RegisterLibFunc(&_IOHIDDeviceGetReport, iokit, "IOHIDDeviceGetReport")
 	purego.RegisterLibFunc(&_IOHIDDeviceGetService, iokit, "IOHIDDeviceGetService")
 	purego.RegisterLibFunc(&_IOHIDDeviceOpen, iokit, "IOHIDDeviceOpen")
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterInputReportCallback, iokit, "IOHIDDeviceRegisterInputReportCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterRemovalCallback, iokit, "IOHIDDeviceRegisterRemovalCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceScheduleWithRunLoop, iokit, "IOHIDDeviceScheduleWithRunLoop")
-	purego.RegisterLibFunc(&_IOHIDDeviceSetReportWithCallback, iokit, "IOHIDDeviceSetReportWithCallback")
+	purego.RegisterLibFunc(&_IOHIDDeviceSetReport, iokit, "IOHIDDeviceSetReport")
 	purego.RegisterLibFunc(&_IOHIDDeviceUnscheduleFromRunLoop, iokit, "IOHIDDeviceUnscheduleFromRunLoop")
 	purego.RegisterLibFunc(&_IOHIDManagerClose, iokit, "IOHIDManagerClose")
 	purego.RegisterLibFunc(&_IOHIDManagerCopyDevices, iokit, "IOHIDManagerCopyDevices")
@@ -234,8 +271,8 @@ func init() {
 }
 
 func byteSliceToString(b []byte) string {
-	if end := bytes.IndexByte(b, 0); end >= 0 {
-		return string(b[:end])
+	if before, _, ok := bytes.Cut(b, []byte{0}); ok {
+		return string(before)
 	}
 	return string(b)
 }
@@ -285,6 +322,9 @@ func getPropertyString(device _IOHIDDeviceRef, key string) (string, error) {
 }
 
 func enumerate() ([]*Device, error) {
+	mgrMtx.Lock()
+	defer mgrMtx.Unlock()
+
 	// IOHIDManagerCopyDevices instantiates HID device wrapper objects that
 	// are autoreleased on the calling thread. Pin the goroutine to its OS
 	// thread (pools are thread-local) and drain the pool when done, so
@@ -333,11 +373,8 @@ func enumerate() ([]*Device, error) {
 		}
 
 		dev := &Device{
-			path: path,
-			extra: deviceExtra{
-				options:      kIOHIDOptionsTypeNone,
-				disconnectCh: make(chan bool),
-			},
+			path:  path,
+			extra: deviceExtra{state: deviceClosed},
 		}
 
 		// FIXME: not all errors should be ignored
@@ -381,15 +418,14 @@ type inputCtx struct {
 	err error
 }
 
-func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
-	if context == nil {
+func inputCallback(context uintptr, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report unsafe.Pointer, reportLength _CFIndex) {
+	d := deviceFromCallbackContext(context)
+	if d == nil {
 		return
 	}
 
-	d := (*Device)(context)
-
-	d.extra.mtx.Lock()
-	defer d.extra.mtx.Unlock()
+	d.extra.stateMtx.Lock()
+	defer d.extra.stateMtx.Unlock()
 
 	if d.extra.inputClosed {
 		return
@@ -398,10 +434,12 @@ func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, rep
 	ctx := inputCtx{}
 	if result != kIOReturnSuccess {
 		ctx.err = fmt.Errorf("0x%08x", result)
-	} else if d.extra.inputBuffer == nil {
-		ctx.err = errors.New("buffer is nil")
+	} else if report == nil {
+		ctx.err = errors.New("report buffer is nil")
+	} else if reportLength < 0 || reportLength > d.extra.inputBufferLen {
+		ctx.err = fmt.Errorf("invalid report length: %d", reportLength)
 	} else {
-		ctx.buf = append([]byte{}, d.extra.inputBuffer[:reportLength]...)
+		ctx.buf = append([]byte{}, unsafe.Slice((*byte)(report), int(reportLength))...)
 	}
 
 	select {
@@ -410,40 +448,118 @@ func inputCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, rep
 	}
 }
 
-func removalCallback(context unsafe.Pointer, result _IOReturn, sender uintptr) {
-	if context == nil {
+func removalCallback(context uintptr, result _IOReturn, sender uintptr) {
+	d := deviceFromCallbackContext(context)
+	if d == nil {
 		return
 	}
 
-	d := (*Device)(context)
-
-	d.extra.mtx.Lock()
-	d.extra.disconnect = true
+	d.extra.stateMtx.Lock()
+	if d.extra.state != deviceOpening && d.extra.state != deviceOpen {
+		d.extra.stateMtx.Unlock()
+		return
+	}
+	d.extra.state = deviceDisconnected
 	d.extra.inputClosed = true
-	d.extra.mtx.Unlock()
+	close(d.extra.done)
+	runloop := d.extra.runloop
+	d.extra.stateMtx.Unlock()
 
-	d.extra.disconnectOnce.Do(func() {
-		close(d.extra.disconnectCh)
-	})
+	// the callback itself runs on this run loop. stop it after this callback returns
+	if runloop != 0 {
+		_CFRunLoopStop(runloop)
+	}
+	go func() {
+		// release from another goroutine.
+		d.close()
+	}()
 }
 
-func sourcePerformCallback(context unsafe.Pointer) {
-	if context == nil {
+func sourcePerformCallback(context uintptr) {
+	d := deviceFromCallbackContext(context)
+	if d == nil {
 		return
 	}
 
-	d := (*Device)(context)
-
-	select {
-	case fn := <-d.extra.ioCh:
-		fn()
-	default:
+	d.extra.stateMtx.Lock()
+	runloop := d.extra.runloop
+	d.extra.stateMtx.Unlock()
+	if runloop != 0 {
+		_CFRunLoopStop(runloop)
 	}
 }
 
-func (d *Device) open(lock bool) error {
-	d.extra.mtx.Lock()
-	defer d.extra.mtx.Unlock()
+func deviceFromCallbackContext(context uintptr) *Device {
+	if context == 0 {
+		return nil
+	}
+
+	callbackDevices.RLock()
+	defer callbackDevices.RUnlock()
+	return callbackDevices.devices[context]
+}
+
+func registerCallbackDevice(d *Device) uintptr {
+	callbackDevices.Lock()
+	defer callbackDevices.Unlock()
+
+	handle := callbackDevices.next
+	callbackDevices.next++
+	if callbackDevices.next == 0 {
+		callbackDevices.next = 1
+	}
+	callbackDevices.devices[handle] = d
+	return handle
+}
+
+func unregisterCallbackDevice(handle uintptr) {
+	if handle == 0 {
+		return
+	}
+
+	callbackDevices.Lock()
+	delete(callbackDevices.devices, handle)
+	callbackDevices.Unlock()
+}
+
+func defaultRunLoopMode() _CFStringRef {
+	return **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode))
+}
+
+func systemAllocator() _CFAllocatorRef {
+	return **(**_CFAllocatorRef)(unsafe.Pointer(&_kCFAllocatorSystemDefault))
+}
+
+func (d *Device) open(lock bool) (err error) {
+	d.extra.lifeMtx.Lock()
+	defer d.extra.lifeMtx.Unlock()
+	sessionPublished := false
+
+	d.extra.stateMtx.Lock()
+	if d.extra.state != deviceClosed {
+		d.extra.stateMtx.Unlock()
+		return ErrDeviceIsOpen
+	}
+	d.extra.state = deviceOpening
+	d.extra.stateMtx.Unlock()
+
+	defer func() {
+		if err != nil && !sessionPublished {
+			d.extra.stateMtx.Lock()
+			d.extra.state = deviceClosed
+			d.extra.stateMtx.Unlock()
+		}
+	}()
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	pool := _objc_autoreleasePoolPush()
+	defer _objc_autoreleasePoolPop(pool)
+
+	options := kIOHIDOptionsTypeNone
+	if lock {
+		options = kIOHIDOptionsTypeSeizeDevice
+	}
 
 	pathB := make([]byte, 512)
 	copy(pathB[:], d.path)
@@ -453,47 +569,83 @@ func (d *Device) open(lock bool) error {
 	}
 	defer _IOObjectRelease(entry)
 
-	d.extra.file = _IOHIDDeviceCreate(kCFAllocatorDefault, entry)
-	if d.extra.file == 0 {
+	file := _IOHIDDeviceCreate(kCFAllocatorDefault, entry)
+	if file == 0 {
 		return errors.New("failed to create iohid device")
 	}
 
-	if lock {
-		d.extra.options = kIOHIDOptionsTypeSeizeDevice
-	}
-	if rv := _IOHIDDeviceOpen(d.extra.file, d.extra.options); rv != kIOReturnSuccess {
-		_CFRelease(_CFTypeRef(d.extra.file))
-		d.extra.file = 0
+	if rv := _IOHIDDeviceOpen(file, options); rv != kIOReturnSuccess {
+		_CFRelease(_CFTypeRef(file))
 		if rv == kIOReturnExclusiveAccess {
 			return ErrDeviceLocked
 		}
 		return fmt.Errorf("0x%08x", rv)
 	}
 
-	d.extra.inputBuffer = make([]byte, d.reportInputLength+1)
-	d.extra.inputCh = make(chan inputCtx)
-	d.extra.runloopDone = make(chan struct{})
-	d.extra.ioCh = make(chan func(), 1)
-	d.extra.ioSource = _CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &_CFRunLoopSourceContext{
+	inputBufferLen := _CFIndex(d.reportInputLength + 1)
+	inputBuffer := _CFAllocatorAllocate(systemAllocator(), inputBufferLen, 0)
+	if inputBuffer == nil {
+		_IOHIDDeviceClose(file, options)
+		_CFRelease(_CFTypeRef(file))
+		return errors.New("failed to allocate input report buffer")
+	}
+	inputBytes := unsafe.Slice((*byte)(inputBuffer), int(inputBufferLen))
+	for i := range inputBytes {
+		inputBytes[i] = 0
+	}
+
+	callbackHandle := registerCallbackDevice(d)
+	callbackContext := callbackHandle
+	ioSource := _CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &_CFRunLoopSourceContext{
 		version: 0,
-		info:    unsafe.Pointer(d),
+		info:    callbackContext,
 		perform: sourcePerformCallbackPtr,
 	})
+	if ioSource == 0 {
+		unregisterCallbackDevice(callbackHandle)
+		_CFAllocatorDeallocate(systemAllocator(), inputBuffer)
+		_IOHIDDeviceClose(file, options)
+		_CFRelease(_CFTypeRef(file))
+		return errors.New("failed to create run loop source")
+	}
 
-	wait := make(chan struct{})
+	inputCh := make(chan inputCtx)
+	done := make(chan struct{})
+	runloopDone := make(chan struct{})
+	ready := make(chan struct{})
+
+	d.extra.stateMtx.Lock()
+	d.extra.file = file
+	d.extra.options = options
+	d.extra.runloop = 0
+	d.extra.runloopDone = runloopDone
+	d.extra.ioSource = ioSource
+	d.extra.done = done
+	d.extra.inputBuffer = inputBuffer
+	d.extra.inputBufferLen = inputBufferLen
+	d.extra.inputCh = inputCh
+	d.extra.inputClosed = false
+	d.extra.callbackHandle = callbackHandle
+	d.extra.stateMtx.Unlock()
+	sessionPublished = true
 
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		d.extra.runloop = _CFRunLoopGetCurrent()
+		runloop := _CFRunLoopGetCurrent()
+		mode := defaultRunLoopMode()
+		pool := _objc_autoreleasePoolPush()
+		_IOHIDDeviceScheduleWithRunLoop(file, runloop, mode)
+		_IOHIDDeviceRegisterInputReportCallback(file, inputBuffer, inputBufferLen, inputCallbackPtr, callbackContext)
+		_IOHIDDeviceRegisterRemovalCallback(file, removalCallbackPtr, callbackContext)
+		_CFRunLoopAddSource(runloop, ioSource, mode)
+		_objc_autoreleasePoolPop(pool)
 
-		_IOHIDDeviceScheduleWithRunLoop(d.extra.file, d.extra.runloop, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), _CFIndex(d.reportInputLength+1), inputCallbackPtr, unsafe.Pointer(d))
-		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, removalCallbackPtr, unsafe.Pointer(d))
-		_CFRunLoopAddSource(d.extra.runloop, d.extra.ioSource, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-
-		wait <- struct{}{}
+		d.extra.stateMtx.Lock()
+		d.extra.runloop = runloop
+		d.extra.stateMtx.Unlock()
+		close(ready)
 
 		// Run the loop in bounded slices, draining the Objective-C
 		// autorelease pool between them. IOHIDLib autoreleases objects on
@@ -502,111 +654,186 @@ func (d *Device) open(lock bool) error {
 		// with a bare CFRunLoopRun those objects would accumulate for the
 		// life of the thread and grow the process footprint without bound.
 		for {
-			pool := _objc_autoreleasePoolPush()
-			rv := _CFRunLoopRunInMode(**(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)), 60, false)
+			select {
+			case <-done:
+				goto stopped
+			default:
+			}
+
+			pool = _objc_autoreleasePoolPush()
+			rv := _CFRunLoopRunInMode(mode, 60, false)
 			_objc_autoreleasePoolPop(pool)
 			if rv == kCFRunLoopRunFinished || rv == kCFRunLoopRunStopped {
 				break
 			}
 		}
 
-		d.extra.mtx.Lock()
+	stopped:
+		d.extra.stateMtx.Lock()
+		disconnected := d.extra.state == deviceDisconnected
+		unexpectedStop := d.extra.state == deviceOpen || d.extra.state == deviceOpening
+		if unexpectedStop {
+			d.extra.state = deviceRunloopFailed
+			close(d.extra.done)
+		}
 		d.extra.inputClosed = true
-		d.extra.mtx.Unlock()
+		d.extra.stateMtx.Unlock()
+		if unexpectedStop {
+			// unexpected run-loop exit has no Close caller holding ioMtx.
+			// Exclude synchronous I/O before touching the IOHID device.
+			d.extra.ioMtx.Lock()
+		}
 
-		close(d.extra.runloopDone)
+		pool = _objc_autoreleasePoolPush()
+		if !disconnected {
+			_IOHIDDeviceRegisterInputReportCallback(file, inputBuffer, inputBufferLen, 0, 0)
+			_IOHIDDeviceRegisterRemovalCallback(file, 0, 0)
+			_IOHIDDeviceUnscheduleFromRunLoop(file, runloop, mode)
+		}
+		_CFRunLoopRemoveSource(runloop, ioSource, mode)
+		_objc_autoreleasePoolPop(pool)
+		close(runloopDone)
+		if unexpectedStop {
+			d.extra.ioMtx.Unlock()
+			go func() {
+				d.close()
+			}()
+		}
 	}()
 
-	<-wait
+	<-ready
 
+	return d.finishOpen()
+}
+
+func (d *Device) finishOpen() error {
+	d.extra.stateMtx.Lock()
+	defer d.extra.stateMtx.Unlock()
+
+	if d.extra.state != deviceOpening {
+		return ErrDeviceIsClosed
+	}
+	d.extra.state = deviceOpen
 	return nil
 }
 
 func (d *Device) isOpen() bool {
-	return d.extra.file != 0
+	d.extra.stateMtx.Lock()
+	defer d.extra.stateMtx.Unlock()
+	return d.extra.state != deviceClosed
 }
 
 func (d *Device) close() error {
-	d.extra.ioMtx.Lock()
-	defer d.extra.ioMtx.Unlock()
+	d.extra.lifeMtx.Lock()
+	defer d.extra.lifeMtx.Unlock()
 
-	if d.extra.file == 0 {
+	d.extra.stateMtx.Lock()
+	if d.extra.state == deviceClosed {
+		d.extra.stateMtx.Unlock()
 		return nil
 	}
 
-	d.extra.mtx.Lock()
-	disconnected := d.extra.disconnect
-	d.extra.mtx.Unlock()
+	disconnected := d.extra.state == deviceDisconnected
+	runloopFailed := d.extra.state == deviceRunloopFailed
+	doneClosed := disconnected || runloopFailed || d.extra.state == deviceClosing
+	if !doneClosed {
+		d.extra.state = deviceClosing
+		close(d.extra.done)
+	}
+	d.extra.inputClosed = true
+	file := d.extra.file
+	options := d.extra.options
+	runloop := d.extra.runloop
+	runloopDone := d.extra.runloopDone
+	ioSource := d.extra.ioSource
+	inputBuffer := d.extra.inputBuffer
+	callbackHandle := d.extra.callbackHandle
+	d.extra.stateMtx.Unlock()
 
-	if !disconnected {
-		_IOHIDDeviceRegisterInputReportCallback(d.extra.file, unsafe.Pointer(&d.extra.inputBuffer[0]), _CFIndex(d.reportInputLength+1), 0, nil)
-		_IOHIDDeviceRegisterRemovalCallback(d.extra.file, 0, nil)
-		_IOHIDDeviceUnscheduleFromRunLoop(d.extra.file, d.extra.runloop, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
-		_CFRunLoopRemoveSource(d.extra.runloop, d.extra.ioSource, **(**_CFStringRef)(unsafe.Pointer(&_kCFRunLoopDefaultMode)))
+	if !runloopFailed {
+		// closing state prevents new operations from starting. taking ioMtx here
+		// lets an already-running synchronous operation finish before the run-loop
+		// thread unregisters or unschedules the same IOHIDDeviceRef.
+		d.extra.ioMtx.Lock()
 	}
 
-	if d.extra.runloopDone != nil {
-		_CFRunLoopStop(d.extra.runloop)
-		<-d.extra.runloopDone
+	if ioSource != 0 {
+		_CFRunLoopSourceSignal(ioSource)
 	}
+	if runloop != 0 {
+		_CFRunLoopWakeUp(runloop)
+		_CFRunLoopStop(runloop)
+	}
+	if runloopDone != nil {
+		<-runloopDone
+	}
+	if runloopFailed {
+		// unexpected run-loop teardown owns ioMtx until runloopDone is closed.
+		d.extra.ioMtx.Lock()
+	}
+	defer d.extra.ioMtx.Unlock()
 
+	var closeErr error
+	runtime.LockOSThread()
+	pool := _objc_autoreleasePoolPush()
 	if !disconnected {
-		if rv := _IOHIDDeviceClose(d.extra.file, d.extra.options); rv != kIOReturnSuccess {
-			return fmt.Errorf("0x%08x", rv)
+		if rv := _IOHIDDeviceClose(file, options); rv != kIOReturnSuccess {
+			closeErr = fmt.Errorf("0x%08x", rv)
 		}
 	}
+	_CFRelease(_CFTypeRef(file))
+	_objc_autoreleasePoolPop(pool)
+	runtime.UnlockOSThread()
 
-	_CFRelease(_CFTypeRef(d.extra.file))
+	if ioSource != 0 {
+		_CFRelease(_CFTypeRef(ioSource))
+	}
+	if inputBuffer != nil {
+		_CFAllocatorDeallocate(systemAllocator(), inputBuffer)
+	}
+	if callbackHandle != 0 {
+		unregisterCallbackDevice(callbackHandle)
+	}
+
+	d.extra.stateMtx.Lock()
 	d.extra.file = 0
+	d.extra.options = kIOHIDOptionsTypeNone
+	d.extra.runloop = 0
+	d.extra.runloopDone = nil
+	d.extra.ioSource = 0
+	d.extra.inputBuffer = nil
+	d.extra.inputBufferLen = 0
+	d.extra.callbackHandle = 0
+	d.extra.state = deviceClosed
+	d.extra.stateMtx.Unlock()
 
-	return nil
+	return closeErr
 }
 
 func (d *Device) getInputReport() (byte, []byte, error) {
+	d.extra.stateMtx.Lock()
+	if d.extra.state != deviceOpen {
+		d.extra.stateMtx.Unlock()
+		return 0, nil, ErrDeviceIsClosed
+	}
+
+	inputCh := d.extra.inputCh
+	done := d.extra.done
+	d.extra.stateMtx.Unlock()
+
 	select {
-	case result := <-d.extra.inputCh:
+	case result := <-inputCh:
 		if result.err != nil {
 			return 0, nil, result.err
 		}
 
-		if d.reportWithId {
+		if d.reportWithId && len(result.buf) > 0 {
 			return result.buf[0], result.buf[1:], nil
 		}
 		return 0, result.buf[:], nil
 
-	case <-d.extra.disconnectCh:
-		if err := d.close(); err != nil {
-			return 0, nil, err
-		}
+	case <-done:
 		return 0, nil, ErrDeviceIsClosed
-	}
-}
-
-type resultCtx struct {
-	len _CFIndex
-	err chan error
-}
-
-func resultCallback(context unsafe.Pointer, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report uintptr, reportLength _CFIndex) {
-	if context == nil {
-		return
-	}
-
-	ctx := (*resultCtx)(context)
-
-	if result != kIOReturnSuccess {
-		ctx.len = 0
-		select {
-		case ctx.err <- fmt.Errorf("0x%08x", result):
-		default:
-		}
-		return
-	}
-
-	ctx.len = reportLength
-	select {
-	case ctx.err <- nil:
-	default:
 	}
 }
 
@@ -614,35 +841,27 @@ func (d *Device) setReport(typ _IOHIDReportType, reportId byte, data []byte) err
 	d.extra.ioMtx.Lock()
 	defer d.extra.ioMtx.Unlock()
 
-	if d.extra.file == 0 {
+	d.extra.stateMtx.Lock()
+	if d.extra.state != deviceOpen {
+		d.extra.stateMtx.Unlock()
 		return ErrDeviceIsClosed
 	}
+	file := d.extra.file
+	d.extra.stateMtx.Unlock()
 
-	ctx := &resultCtx{
-		err: make(chan error, 1),
-	}
 	buf := append([]byte{}, data...)
 	if d.reportWithId {
 		buf = append([]byte{reportId}, buf...)
 	}
 
-	d.extra.ioCh <- func() {
-		if rv := _IOHIDDeviceSetReportWithCallback(d.extra.file, typ, _CFIndex(reportId), buf, _CFIndex(len(buf)), 0, resultCallbackPtr, unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
-			select {
-			case ctx.err <- fmt.Errorf("0x%08x", rv):
-			default:
-			}
-		}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	pool := _objc_autoreleasePoolPush()
+	defer _objc_autoreleasePoolPop(pool)
+	if rv := _IOHIDDeviceSetReport(file, typ, _CFIndex(reportId), buf, _CFIndex(len(buf))); rv != kIOReturnSuccess {
+		return fmt.Errorf("0x%08x", rv)
 	}
-	_CFRunLoopSourceSignal(d.extra.ioSource)
-	_CFRunLoopWakeUp(d.extra.runloop)
-
-	select {
-	case err := <-ctx.err:
-		return err
-	case <-d.extra.disconnectCh:
-		return ErrDeviceIsClosed
-	}
+	return nil
 }
 
 func (d *Device) setOutputReport(reportId byte, data []byte) error {
@@ -657,38 +876,34 @@ func (d *Device) getFeatureReport(reportId byte) ([]byte, error) {
 	d.extra.ioMtx.Lock()
 	defer d.extra.ioMtx.Unlock()
 
-	if d.extra.file == 0 {
+	d.extra.stateMtx.Lock()
+	if d.extra.state != deviceOpen {
+		d.extra.stateMtx.Unlock()
 		return nil, ErrDeviceIsClosed
 	}
+	file := d.extra.file
+	d.extra.stateMtx.Unlock()
 
-	ctx := &resultCtx{
-		err: make(chan error, 1),
-	}
 	buf := make([]byte, d.reportFeatureLength+1)
+	if d.reportWithId {
+		buf[0] = reportId
+	}
 	l := _CFIndex(d.reportFeatureLength + 1)
 
-	d.extra.ioCh <- func() {
-		if rv := _IOHIDDeviceGetReportWithCallback(d.extra.file, kIOHIDReportTypeFeature, _CFIndex(reportId), buf, &l, 0, resultCallbackPtr, unsafe.Pointer(ctx)); rv != kIOReturnSuccess {
-			select {
-			case ctx.err <- fmt.Errorf("0x%08x", rv):
-			default:
-			}
-		}
+	runtime.LockOSThread()
+	pool := _objc_autoreleasePoolPush()
+	rv := _IOHIDDeviceGetReport(file, kIOHIDReportTypeFeature, _CFIndex(reportId), buf, &l)
+	_objc_autoreleasePoolPop(pool)
+	runtime.UnlockOSThread()
+	if rv != kIOReturnSuccess {
+		return nil, fmt.Errorf("0x%08x", rv)
 	}
-	_CFRunLoopSourceSignal(d.extra.ioSource)
-	_CFRunLoopWakeUp(d.extra.runloop)
-
-	select {
-	case err := <-ctx.err:
-		if err != nil {
-			return nil, err
-		}
-	case <-d.extra.disconnectCh:
-		return nil, ErrDeviceIsClosed
+	if l < 0 || l > _CFIndex(len(buf)) {
+		return nil, fmt.Errorf("invalid report length: %d", l)
 	}
 
 	if d.reportWithId {
-		return buf[1:ctx.len], nil
+		return buf[1:l], nil
 	}
-	return buf[:ctx.len], nil
+	return buf[:l], nil
 }
