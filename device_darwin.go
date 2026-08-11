@@ -81,6 +81,8 @@ type deviceExtra struct {
 	runloop     _CFRunLoopRef
 	runloopDone chan struct{}
 	ioSource    _CFRunLoopSourceRef
+	ioCh        chan func()
+	reportCh    chan _IOReturn
 
 	done chan struct{}
 
@@ -166,7 +168,7 @@ var (
 	_IOHIDDeviceRegisterInputReportCallback func(device _IOHIDDeviceRef, report unsafe.Pointer, reportLength _CFIndex, callback uintptr, context uintptr)
 	_IOHIDDeviceRegisterRemovalCallback     func(device _IOHIDDeviceRef, callback uintptr, context uintptr)
 	_IOHIDDeviceScheduleWithRunLoop         func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
-	_IOHIDDeviceSetReport                   func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportID _CFIndex, report []byte, reportLength _CFIndex) _IOReturn
+	_IOHIDDeviceSetReportWithCallback       func(device _IOHIDDeviceRef, reportType _IOHIDReportType, reportID _CFIndex, report unsafe.Pointer, reportLength _CFIndex, timeout _CFTimeInterval, callback uintptr, context uintptr) _IOReturn
 	_IOHIDDeviceUnscheduleFromRunLoop       func(device _IOHIDDeviceRef, runLoop _CFRunLoopRef, runLoopMode _CFStringRef)
 	_IOHIDManagerCopyDevices                func(manager _IOHIDManagerRef) _CFSetRef
 	_IOHIDManagerCreate                     func(allocator _CFAllocatorRef, options _IOOptionBits) _IOHIDManagerRef
@@ -183,6 +185,7 @@ var (
 
 	inputCallbackPtr         = purego.NewCallback(inputCallback)
 	removalCallbackPtr       = purego.NewCallback(removalCallback)
+	reportCallbackPtr        = purego.NewCallback(reportCallback)
 	sourcePerformCallbackPtr = purego.NewCallback(sourcePerformCallback)
 )
 
@@ -254,7 +257,7 @@ func init() {
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterInputReportCallback, iokit, "IOHIDDeviceRegisterInputReportCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceRegisterRemovalCallback, iokit, "IOHIDDeviceRegisterRemovalCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceScheduleWithRunLoop, iokit, "IOHIDDeviceScheduleWithRunLoop")
-	purego.RegisterLibFunc(&_IOHIDDeviceSetReport, iokit, "IOHIDDeviceSetReport")
+	purego.RegisterLibFunc(&_IOHIDDeviceSetReportWithCallback, iokit, "IOHIDDeviceSetReportWithCallback")
 	purego.RegisterLibFunc(&_IOHIDDeviceUnscheduleFromRunLoop, iokit, "IOHIDDeviceUnscheduleFromRunLoop")
 	purego.RegisterLibFunc(&_IOHIDManagerCopyDevices, iokit, "IOHIDManagerCopyDevices")
 	purego.RegisterLibFunc(&_IOHIDManagerCreate, iokit, "IOHIDManagerCreate")
@@ -468,17 +471,33 @@ func removalCallback(context uintptr, result _IOReturn, sender uintptr) {
 	d.extra.state = deviceDisconnected
 	d.extra.inputClosed = true
 	close(d.extra.done)
-	runloop := d.extra.runloop
 	d.extra.stateMtx.Unlock()
 
-	// the callback itself runs on this run loop. stop it after this callback returns
-	if runloop != 0 {
-		_CFRunLoopStop(runloop)
-	}
 	go func() {
-		// release from another goroutine.
+		// close waits for any asynchronous report completion before stopping
+		// the run loop. stopping it in this callback could prevent that
+		// completion from being delivered and deadlock close on ioMtx.
 		d.close()
 	}()
+}
+
+func reportCallback(context uintptr, result _IOReturn, sender uintptr, reportType _IOHIDReportType, reportId uint32, report unsafe.Pointer, reportLength _CFIndex) {
+	d := deviceFromCallbackContext(context)
+	if d == nil {
+		return
+	}
+
+	d.extra.stateMtx.Lock()
+	reportCh := d.extra.reportCh
+	d.extra.stateMtx.Unlock()
+	if reportCh == nil {
+		return
+	}
+
+	select {
+	case reportCh <- result:
+	default:
+	}
 }
 
 func sourcePerformCallback(context uintptr) {
@@ -488,8 +507,17 @@ func sourcePerformCallback(context uintptr) {
 	}
 
 	d.extra.stateMtx.Lock()
+	ioCh := d.extra.ioCh
 	runloop := d.extra.runloop
 	d.extra.stateMtx.Unlock()
+
+	select {
+	case fn := <-ioCh:
+		fn()
+		return
+	default:
+	}
+
 	if runloop != 0 {
 		_CFRunLoopStop(runloop)
 	}
@@ -618,6 +646,8 @@ func (d *Device) open(lock bool) (err error) {
 	inputCh := make(chan inputCtx)
 	done := make(chan struct{})
 	runloopDone := make(chan struct{})
+	ioCh := make(chan func(), 1)
+	reportCh := make(chan _IOReturn, 1)
 	ready := make(chan struct{})
 
 	d.extra.stateMtx.Lock()
@@ -626,6 +656,8 @@ func (d *Device) open(lock bool) (err error) {
 	d.extra.runloop = 0
 	d.extra.runloopDone = runloopDone
 	d.extra.ioSource = ioSource
+	d.extra.ioCh = ioCh
+	d.extra.reportCh = reportCh
 	d.extra.done = done
 	d.extra.inputBuffer = inputBuffer
 	d.extra.inputBufferLen = inputBufferLen
@@ -686,7 +718,7 @@ func (d *Device) open(lock bool) (err error) {
 		d.extra.stateMtx.Unlock()
 		if unexpectedStop {
 			// unexpected run-loop exit has no Close caller holding ioMtx.
-			// Exclude synchronous I/O before touching the IOHID device.
+			// exclude report I/O before touching the IOHID device.
 			d.extra.ioMtx.Lock()
 		}
 
@@ -758,7 +790,7 @@ func (d *Device) close() error {
 
 	if !runloopFailed {
 		// closing state prevents new operations from starting. taking ioMtx here
-		// lets an already-running synchronous operation finish before the run-loop
+		// lets an already-running report operation finish before the run-loop
 		// thread unregisters or unschedules the same IOHIDDeviceRef.
 		d.extra.ioMtx.Lock()
 	}
@@ -807,6 +839,8 @@ func (d *Device) close() error {
 	d.extra.runloop = 0
 	d.extra.runloopDone = nil
 	d.extra.ioSource = 0
+	d.extra.ioCh = nil
+	d.extra.reportCh = nil
 	d.extra.inputBuffer = nil
 	d.extra.inputBufferLen = 0
 	d.extra.callbackHandle = 0
@@ -853,6 +887,11 @@ func (d *Device) setReport(typ _IOHIDReportType, reportId byte, data []byte) err
 		return ErrDeviceIsClosed
 	}
 	file := d.extra.file
+	runloop := d.extra.runloop
+	ioSource := d.extra.ioSource
+	ioCh := d.extra.ioCh
+	reportCh := d.extra.reportCh
+	callbackHandle := d.extra.callbackHandle
 	d.extra.stateMtx.Unlock()
 
 	buf := append([]byte{}, data...)
@@ -860,12 +899,40 @@ func (d *Device) setReport(typ _IOHIDReportType, reportId byte, data []byte) err
 		buf = append([]byte{reportId}, buf...)
 	}
 
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	pool := _objc_autoreleasePoolPush()
-	defer _objc_autoreleasePoolPop(pool)
-	if rv := _IOHIDDeviceSetReport(file, typ, _CFIndex(reportId), buf, _CFIndex(len(buf))); rv != kIOReturnSuccess {
-		return ioReturnError(rv)
+	allocationLen := _CFIndex(len(buf))
+	if allocationLen == 0 {
+		allocationLen = 1
+	}
+	report := _CFAllocatorAllocate(systemAllocator(), allocationLen, 0)
+	if report == nil {
+		return errors.New("failed to allocate report buffer")
+	}
+	defer _CFAllocatorDeallocate(systemAllocator(), report)
+	copy(unsafe.Slice((*byte)(report), int(allocationLen)), buf)
+
+	// ioMtx permits only one report operation at a time, so any value left
+	// here would belong to an operation that violated IOKit's callback
+	// contract. discard it rather than associating it with this report.
+	select {
+	case <-reportCh:
+	default:
+	}
+
+	ioCh <- func() {
+		rv := _IOHIDDeviceSetReportWithCallback(file, typ, _CFIndex(reportId), report, _CFIndex(len(buf)), 0, reportCallbackPtr, callbackHandle)
+		if rv != kIOReturnSuccess {
+			select {
+			case reportCh <- rv:
+			default:
+			}
+		}
+	}
+	_CFRunLoopSourceSignal(ioSource)
+	_CFRunLoopWakeUp(runloop)
+
+	result := <-reportCh
+	if result != kIOReturnSuccess {
+		return ioReturnError(result)
 	}
 	return nil
 }
